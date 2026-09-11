@@ -65,8 +65,13 @@ spec:
             - name: PGDATA
               value: /var/lib/postgresql/data/pgdata
             {{- with .Values.postgresql.extraEnv }}
-            {{- toYaml . | nindent 12 }}
+            {{- include "headscale.renderExtraEnv" . | nindent 12 }}
             {{- end }}
+{{- if .Values.postgresql.secretsEnv }}
+          envFrom:
+            - secretRef:
+                name: {{ include "headscale.fullname" . }}-postgresql-extra-env
+{{- end }}
           ports:
             - name: postgresql
               containerPort: 5432

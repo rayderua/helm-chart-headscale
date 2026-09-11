@@ -9,7 +9,7 @@ Noise key:     {{- if .Values.noisePrivateKey.existingSecret }} existingSecret={
 {{- end }}
 
 Check pod status:
-  kubectl -n {{ .Release.Namespace }} get pods -l {{ include "headscale.selectorLabels" . | replace "\n" "," }}
+  kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/component=headscale,{{ include "headscale.selectorLabels" . | replace "\n" "," }}
 
 Only one of the 3 pods actually runs headscale at a time. Find out which:
   kubectl -n {{ .Release.Namespace }} exec {{ include "headscale.fullname" . }}-0 -c consul-agent -- \

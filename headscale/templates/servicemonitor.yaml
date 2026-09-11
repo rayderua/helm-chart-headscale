@@ -12,6 +12,7 @@ spec:
   selector:
     matchLabels:
       {{- include "headscale.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: headscale
   endpoints:
     - port: metrics
       interval: {{ .Values.serviceMonitor.interval }}

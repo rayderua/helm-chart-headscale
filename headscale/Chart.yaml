@@ -1,9 +1,9 @@
 apiVersion: v2
 name: headscale
-description: Helm chart for deploying Headscale (self-hosted Tailscale control server) as a StatefulSet
+description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven leader election + Envoy sidecar mesh) with a lightweight bundled Consul and optional bundled PostgreSQL
 type: application
 version: 0.1.0
-appVersion: "0.23.0"
+appVersion: "0.29.3"
 home: https://github.com/juanfont/headscale
 sources:
   - https://github.com/juanfont/headscale

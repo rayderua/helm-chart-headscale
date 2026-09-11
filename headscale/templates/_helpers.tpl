@@ -200,7 +200,38 @@ api-key
 {{- end -}}
 {{- end -}}
 
-{{/* Consul KV path where the headscale-pf API key is auto-provisioned */}}
+{{/* Renders a map of extraEnv entries (not a list, so CI tools like
+helmfile that merge multiple values files can combine entries instead of
+one file's list silently replacing another's) into standard k8s env
+entries. Each value is either a plain scalar (-> `value: ...`) or a map
+(-> `valueFrom: ...`, passed through as-is so secretKeyRef/configMapKeyRef/
+fieldRef/etc all just work). */}}
+{{- define "headscale.renderExtraEnv" -}}
+{{- range $key, $val := . }}
+- name: {{ $key }}
+{{- if kindIs "map" $val }}
+  valueFrom:
+{{ toYaml $val | indent 4 }}
+{{- else }}
+  value: {{ $val | quote }}
+{{- end }}
+{{- end }}
+{{- end -}}
+
+{{/* Guard: refuse to start with no DERP source at all - and refuse to
+silently default to Tailscale's public relays, since this chart is for
+running your own headscale. HTTPS-only for now (urls or customMap) -
+embedded DERP server (headscale.derp.server.enabled) isn't a supported
+path here yet, it needs a whole separate story around exposing STUN
+(UDP), planned as its own chart later. */}}
+{{- define "headscale.derpValidate" -}}
+{{- $hasUrls := gt (len .Values.headscale.derp.urls) 0 -}}
+{{- $hasCustomMap := .Values.headscale.derp.customMap.enabled -}}
+{{- if not (or $hasUrls $hasCustomMap) -}}
+{{ fail "headscale.derp: no DERP source configured, and this chart won't silently default to Tailscale's public relays for a self-hosted deployment. Set ONE of: headscale.derp.urls (use a public/third-party DERP map) or headscale.derp.customMap.enabled: true (bring your own DERP map)." }}
+{{- end -}}
+{{- end -}}
+
 {{- define "headscale.aclSyncApiKeyKvPath" -}}
 headscale/pf-api-key
 {{- end -}}

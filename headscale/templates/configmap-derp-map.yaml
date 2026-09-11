@@ -1,0 +1,25 @@
+{{- if .Values.headscale.derp.customMap.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-derp-map
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+data:
+  # Referenced via a derp.paths entry in config.yaml (see
+  # configmap-config.yaml). headscale reads this once at process start -
+  # changing it relies on the checksum/derp-map annotation in the
+  # StatefulSet pod template to trigger a rolling restart, same as any
+  # other config change.
+  derp-map.yaml: |
+{{- if .Values.headscale.derp.customMap.rawContent }}
+  {{ .Values.headscale.derp.customMap.rawContent | indent 4 }}
+{{- else }}
+    OmitDefaultRegions: {{ .Values.headscale.derp.customMap.omitDefaultRegions }}
+    regions:
+    {{- range $region, $regionConfig := .Values.headscale.derp.customMap.regions }}
+      {{ $region | int }}:
+        {{- toYaml $regionConfig | nindent 8 }}
+    {{- end }}
+{{- end }}
+{{- end -}}

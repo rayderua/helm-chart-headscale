@@ -66,6 +66,76 @@ headscale:
   ephemeralNodeInactivityTimeout: 30m
   disableCheckUpdates: true
 
+  # -- DERP relay configuration. headscale refuses to start with an empty
+  # DERPMap - this chart also refuses to silently default to Tailscale's
+  # public relay map (see headscale.derpValidate), so you must explicitly
+  # set one of urls/customMap below. HTTPS-only for now; embedded DERP
+  # server support is deferred to a separate chart later (needs its own
+  # story around exposing STUN/UDP).
+  derp:
+    # -- NOT defaulted to Tailscale's public relay map on purpose - this
+    # chart is for running your own headscale, defaulting to depend on
+    # Tailscale's infrastructure anyway would undercut that. The chart
+    # fails fast at template time unless you explicitly opt into exactly
+    # one of: urls (below), server.enabled (your own embedded DERP), or
+    # customMap.enabled (your own DERP map) - see headscale.derpValidate.
+    urls: []
+      # - https://controlplane.tailscale.com/derpmap/default
+    # -- static DERP map file paths already present in the image/volumes
+    # (e.g. mounted via extraVolumes yourself). For a chart-managed custom
+    # map, use customMap below instead - it's wired in automatically.
+    paths: []
+    # -- custom DERP map (Tailscale DERPMap YAML format), managed by the
+    # chart: rendered into its own ConfigMap, mounted into the pod, and
+    # its path added to derp.paths automatically. headscale doesn't
+    # hot-reload local DERP map files, so changing this content triggers
+    # the same checksum-driven StatefulSet rolling restart as any other
+    # config.yaml change - not a live reload, an honest restart.
+    customMap:
+      enabled: false
+      # -- structured DERP map (Tailscale DERPMap YAML format), rendered
+      # via toYaml. Preferred over rawContent - gets you real YAML
+      # validation/overrides instead of an opaque string blob.
+      # -- a map keyed by region ID, matching Tailscale's own DERPMap shape.
+      # The key must still end up as a genuine integer in the rendered
+      # file - headscale's DERPMap struct wants map[int]*DERPRegion, and
+      # Helm's values system always turns map keys into Go strings
+      # internally, so a naive toYaml round-trip here would emit a quoted
+      # "900": key and headscale would reject it (cannot unmarshal !!str
+      # into int). The template forces it back with `| int` when building
+      # the "<id>:" line, so write the key here however you like (quoted
+      # or not) - it doesn't matter, the template normalizes it.
+      regions: {}
+        # 900:
+        #   RegionID: 900
+        #   RegionCode: "custom"
+        #   RegionName: "My custom DERP"
+        #   Nodes:
+        #     - Name: "900a"
+        #       RegionID: 900
+        #       HostName: "derp.example.com"
+      # -- raw YAML text instead, if you want exact control over
+      # formatting/comments. Takes precedence over regions when set (same
+      # rawPolicy-over-policy pattern as acl.rawPolicy). Ignored - has no
+      # effect - if omitDefaultRegions is set, since that's only rendered
+      # in the structured (non-raw) path; include it yourself in rawContent.
+      rawContent: ""
+      # -- if true, clients use ONLY the regions listed above, dropping
+      # Tailscale's default DERP regions entirely instead of merging with
+      # them. Only applies to the structured `regions` path above (add
+      # `OmitDefaultRegions: true` yourself if using rawContent).
+      omitDefaultRegions: false
+    autoUpdateEnabled: true
+    updateFrequency: 3h
+    # -- embedded DERP server: deferred for now, needs a whole separate
+    # story around exposing STUN (UDP - Ingress can't do it, and
+    # leader-aware UDP routing needs more than this chart's Envoy setup
+    # currently does). Plan is a dedicated chart for a real DERP cluster
+    # later; for now this stays a plain off switch, HTTPS-only via
+    # urls/customMap above.
+    server:
+      enabled: false
+
   # -- arbitrary extra keys, merged as-is into config.yaml
   extraConfig: {}
 
@@ -143,7 +213,14 @@ postgresql:
     runAsNonRoot: true
     runAsUser: 999
 
-  extraEnv: []
+  # -- extra env vars for the bundled postgres container, as a MAP (see
+  # top-level extraEnv below for the full explanation/shape)
+  extraEnv: {}
+  # -- same idea, but the chart creates a Secret from these (values are
+  # plaintext here, wrapped into a Secret at deploy time) and wires it in
+  # via envFrom - use this for anything sensitive instead of extraEnv.
+  secretsEnv: {}
+    # SOME_TOKEN: "plaintext-value-the-chart-wraps-into-a-secret"
   nodeSelector: {}
   tolerations: []
   affinity: {}
@@ -292,19 +369,24 @@ acl:
         # `headscale apikeys create` connects to a running `headscale
         # serve` over its local unix socket, not the DB directly, so it
         # can't be pre-generated offline the way the noise key or Consul
-        # ACL token can. A post-install/post-upgrade Job asks Consul KV
-        # which of the 3 pods is currently leader, execs
-        # `headscale apikeys create` into that one, and stores the result
-        # in Consul KV (headscale/pf-api-key) rather than a k8s Secret - a
-        # Secret written imperatively by a Job is invisible to GitOps
-        # tools like Argo CD (it wasn't in the rendered manifest set, so
-        # it's either untracked or fought over on every sync/prune).
-        # Consul KV has no such problem since Argo CD has no opinion about
-        # it at all.
+        # ACL token can - and only works on whichever pod is currently
+        # leader (the others don't run headscale at all). No external
+        # Job/kubectl-exec/RBAC for this: whichever pod's consul-agent
+        # sidecar holds the lock notices Consul KV is missing the key,
+        # asks the headscale container next door (over a shared-volume
+        # file handoff - the only container with actual access to the
+        # headscale binary) to run the CLI command locally, and stores the
+        # result in Consul KV (headscale/pf-api-key) rather than a k8s
+        # Secret - a Secret written imperatively is invisible to GitOps
+        # tools like Argo CD (never appears in the rendered manifest set,
+        # so it's either untracked or fought over on every sync/prune).
+        # Consul KV has no such problem, and this self-heals: if the key
+        # is ever missing for any reason, the next pass re-requests it, no
+        # helm upgrade needed.
         #
         # Set existingSecret instead if you'd rather manage the key
-        # yourself; the chart then skips the Job and Consul-KV fetch
-        # entirely and reads from that Secret.
+        # yourself; the chart then skips all of the above entirely and
+        # reads from that Secret.
         existingSecret: ""
         existingSecretKey: "api-key"
         expiration: "8760h"
@@ -392,7 +474,7 @@ ha:
   envoy:
     image:
       repository: envoyproxy/envoy
-      tag: "v1.31-latest"
+      tag: "v1.39-latest"
       pullPolicy: IfNotPresent
     resources: {}
     # -- also run an active health check from envoy itself against the
@@ -479,22 +561,28 @@ serviceMonitor:
   interval: 30s
   additionalLabels: {}
 
-extraEnv: []
+# -- extra environment variables for the headscale container, as a MAP
+# (not a list) - specifically so CI tools that merge several values files
+# (helmfile environments, etc.) can combine entries from different files.
+# Helm/Helmfile merge maps key-by-key, but a list from one file completely
+# replaces a list from another - no merging, whichever file applies last
+# wins outright. Two shapes per entry:
+#   PLAIN_VAR: "some value"                  -> rendered as `value: ...`
+#   FROM_SECRET:                             -> rendered as `valueFrom: ...`
+#     secretKeyRef:
+#       name: some-secret
+#       key: some-key
+# Any valid EnvVarSource works the same way (configMapKeyRef, fieldRef,
+# resourceFieldRef, ...) - passed through as-is under valueFrom.
+extraEnv: {}
+# -- same idea, but the chart creates a Secret from these (values are
+# plaintext here, wrapped into a Secret at deploy time) and wires it in
+# via envFrom - use this for anything sensitive instead of extraEnv, so it
+# isn't sitting in a ConfigMap/pod spec in plain text.
+secretsEnv: {}
+  # SOME_TOKEN: "plaintext-value-the-chart-wraps-into-a-secret"
 extraVolumes: []
 extraVolumeMounts: []
-
-# -- image for the helper container used by the acl-sync API-key Job
-# (needs bash + kubectl + curl). NOT bitnami/kubectl - Bitnami reworked
-# their free catalog in 2025 and floating minor-version tags like "1.30"
-# for most bitnami/* images are gone (archived/frozen, or moved behind
-# their paid "Secure Images" catalog); alpine/k8s is actively maintained
-# for exactly this kind of CI/Job use case and bundles what we need.
-# Doesn't need to exactly match your cluster's k8s version - kubectl is
-# fine within the usual +/-1 minor version skew.
-helperImage:
-  repository: alpine/k8s
-  tag: "1.30.2"
-  pullPolicy: IfNotPresent
 
 # -- arbitrary extra Kubernetes manifests to render alongside this chart's
 # own resources (e.g. a NetworkPolicy, a PrometheusRule, an extra

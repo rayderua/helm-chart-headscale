@@ -5,6 +5,7 @@ metadata:
   labels:
     {{- include "headscale.labels" . | nindent 4 }}
 data:
+{{- include "headscale.derpValidate" . }}
   config.yaml: |
     server_url: {{ .Values.headscale.serverUrl | quote }}
     # headscale binds to internal-only ports here - envoy owns
@@ -21,6 +22,12 @@ data:
     noise:
       private_key_path: /etc/headscale/noise/noise_private.key
 
+    # Headscale's own default (/var/run/headscale/headscale.sock) isn't
+    # writable by a non-root container (/var/run is root-owned) - point it
+    # at /var/lib/headscale instead, which is already our writable,
+    # correctly-owned (podSecurityContext.fsGroup) persistent data dir.
+    unix_socket: /var/lib/headscale/headscale.sock
+
     database:
       type: postgres
       postgres:
@@ -29,7 +36,7 @@ data:
         name: {{ .Values.database.postgres.name | quote }}
         user: {{ .Values.database.postgres.user | quote }}
         # The password is intentionally NOT stored in this ConfigMap, it is
-        # passed via the HEADSCALE_DATABASE_POSTGRES_PASSWORD environment
+        # passed via the HEADSCALE_DATABASE_POSTGRES_PASS environment
         # variable, sourced from a Secret.
         ssl: {{ .Values.database.postgres.sslMode | quote }}
         max_open_conns: {{ .Values.database.postgres.maxOpenConns }}
@@ -44,6 +51,32 @@ data:
       ephemeral:
         inactivity_timeout: {{ .Values.headscale.ephemeralNodeInactivityTimeout | quote }}
     disable_check_updates: {{ .Values.headscale.disableCheckUpdates }}
+
+    derp:
+      server:
+        enabled: {{ .Values.headscale.derp.server.enabled }}
+{{- if .Values.headscale.derp.urls }}
+      urls:
+{{- range .Values.headscale.derp.urls }}
+        - {{ . | quote }}
+{{- end }}
+{{- else }}
+      urls: []
+{{- end }}
+{{- $derpPaths := .Values.headscale.derp.paths }}
+{{- if .Values.headscale.derp.customMap.enabled }}
+{{- $derpPaths = append $derpPaths "/etc/headscale/derp-map/derp-map.yaml" }}
+{{- end }}
+{{- if $derpPaths }}
+      paths:
+{{- range $derpPaths }}
+        - {{ . | quote }}
+{{- end }}
+{{- else }}
+      paths: []
+{{- end }}
+      auto_update_enabled: {{ .Values.headscale.derp.autoUpdateEnabled }}
+      update_frequency: {{ .Values.headscale.derp.updateFrequency | quote }}
 
 {{- if .Values.acl.enabled }}
     policy:

@@ -39,8 +39,15 @@ data:
     # critical state". The outer retry loop already recovers from that on
     # its own within a couple of seconds, but wait for this node to show
     # up as "alive" first to avoid that noisy failed attempt most of the time.
-    until consul members -http-addr={{ include "headscale.consulLocalHttpAddr" . }} 2>/dev/null | grep -q "^$(hostname)[[:space:]].*alive"; do
-      echo "waiting for local node to be marked alive..."
+    # `consul members` only reflects Serf gossip membership - a node can
+    # look "alive" there before the SERVER's catalog-side serfHealth CHECK
+    # (what `consul lock`/session-create actually looks at) has caught up
+    # via anti-entropy sync. Query that check directly instead of guessing
+    # via a different layer. `?filter=` narrows the response to just this
+    # one check, so a plain grep for "passing" is safe (no risk of matching
+    # some other, unrelated check's status).
+    until wget -qO- "http://{{ include "headscale.consulLocalHttpAddr" . }}/v1/health/node/$(hostname)?filter=CheckID%3D%3D%22serfHealth%22" 2>/dev/null | grep -q '"Status":"passing"'; do
+      echo "waiting for the serfHealth check to turn passing..."
       sleep 2
     done
 
@@ -105,6 +112,9 @@ data:
       rm -f /shared/leader
       consul kv delete -http-addr={{ include "headscale.consulLocalHttpAddr" . }} headscale/leader-addr >/dev/null 2>&1 || true
       consul kv delete -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.leaderPodKvPath" . }} >/dev/null 2>&1 || true
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled (not .Values.acl.sync.headscale.apiKey.existingSecret) }}
+      kill $APIKEY_PID 2>/dev/null || true
+{{- end }}
       exit 0
     }
     trap cleanup TERM INT
@@ -122,6 +132,38 @@ data:
     # actually has `headscale serve` running right now.
     consul kv put -http-addr={{ include "headscale.consulLocalHttpAddr" . }} \
       {{ include "headscale.leaderPodKvPath" . }} "$(hostname)" >/dev/null
+
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled (not .Values.acl.sync.headscale.apiKey.existingSecret) }}
+    # headscale-pf's API key can only be minted by a running `headscale
+    # serve` over its local unix socket - so this side (consul-agent, on
+    # whichever pod is leader) owns the Consul-KV bookkeeping, and hands
+    # the actual "run the CLI command" part to the headscale container
+    # next door via a plain file handoff on the shared volume: touch a
+    # request flag, headscale-supervisor.sh (which has direct access to
+    # the headscale binary, unlike this container) notices it, runs the
+    # command locally, and drops the result back for us to pick up. No
+    # kubectl exec, no RBAC for pod exec, and it self-heals - if the key
+    # is ever missing from Consul KV for any reason, the next pass here
+    # re-requests it, no helm upgrade needed.
+    (
+      while true; do
+        sleep 15
+        if ! consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.aclSyncApiKeyKvPath" . }} >/dev/null 2>&1; then
+          touch /shared/need-api-key
+          if [ -f /shared/api-key-result ]; then
+            KEY=$(cat /shared/api-key-result)
+            if [ -n "$KEY" ]; then
+              consul kv put -http-addr={{ include "headscale.consulLocalHttpAddr" . }} \
+                {{ include "headscale.aclSyncApiKeyKvPath" . }} "$KEY" >/dev/null
+              rm -f /shared/api-key-result /shared/need-api-key
+              echo "headscale-pf API key generated and stored in Consul KV"
+            fi
+          fi
+        fi
+      done
+    ) &
+    APIKEY_PID=$!
+{{- end }}
 
     FAILS=0
     GRACE_LEFT={{ .Values.ha.lock.startupGraceSeconds }}
@@ -213,6 +255,22 @@ data:
           headscale serve &
           HS_PID=$!
         fi
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled (not .Values.acl.sync.headscale.apiKey.existingSecret) }}
+        # consul-agent asks for this by touching the flag when Consul KV
+        # doesn't have a headscale-pf API key yet. We're the only container
+        # with actual access to the headscale binary, so we run the CLI
+        # command locally (over its unix socket) and hand the result back
+        # via the shared volume. Harmless to retry every loop iteration
+        # (e.g. right after a fresh promotion, before the socket is even
+        # up yet) - just keeps failing silently until it works.
+        if [ -f /shared/need-api-key ] && [ ! -f /shared/api-key-result ]; then
+          KEY=$(headscale apikeys create --expiration {{ .Values.acl.sync.headscale.apiKey.expiration | quote }} 2>/dev/null | tail -n1 | tr -d '\r\n')
+          if [ -n "$KEY" ]; then
+            echo "$KEY" > /shared/api-key-result
+            echo "fulfilled pending headscale-pf API key request"
+          fi
+        fi
+{{- end }}
       else
         stop_headscale
       fi

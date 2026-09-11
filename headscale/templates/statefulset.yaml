@@ -11,21 +11,26 @@ spec:
   selector:
     matchLabels:
       {{- include "headscale.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: headscale
   template:
     metadata:
       labels:
         {{- include "headscale.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: headscale
         {{- with .Values.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
       annotations:
         {{- if .Values.reload.enabled }}
-        # Restarts the pod ONLY when config.yaml changes (it contains
-        # settings headscale genuinely cannot reload at runtime: listen_addr,
-        # database, noise, etc). ACL and DNS records are excluded - they are
-        # hot-reloaded without a restart (see the reload sidecar and
-        # extra_records_path).
+        # Restarts the pod when config.yaml (or the custom DERP map, if
+        # any) changes - settings headscale genuinely cannot reload at
+        # runtime: listen_addr, database, noise, DNS records, DERP map,
+        # etc. ACL is the one exception with its own restart-free reload
+        # path - see acl.reloadSidecar / acl.sync.
         checksum/config: {{ include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum }}
+        {{- if .Values.headscale.derp.customMap.enabled }}
+        checksum/derp-map: {{ include (print $.Template.BasePath "/configmap-derp-map.yaml") . | sha256sum }}
+        {{- end }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -43,8 +48,39 @@ spec:
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- if .Values.postgresql.enabled }}
       initContainers:
+        # Envoy's file-based EDS requires the path to already exist at
+        # startup - it can't just wait for the file to show up later, it
+        # fails hard during cluster init. The consul-agent sidecar only
+        # writes the real EDS files once it learns who the current leader
+        # is (async, can take a few seconds), so seed empty-but-valid
+        # placeholders first to guarantee the path exists by the time the
+        # envoy container starts. Zero endpoints just means "no leader
+        # known yet" - matches reality on a cold start anyway.
+        - name: seed-envoy-eds
+          image: "{{ .Values.acl.reloadSidecar.image.repository }}:{{ .Values.acl.reloadSidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.acl.reloadSidecar.image.pullPolicy }}
+          command:
+            - /bin/sh
+            - -c
+            - |
+              mkdir -p /shared/eds
+              cat > /shared/eds/http.yaml <<'EOF'
+              resources:
+              - "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment
+                cluster_name: headscale_http_active
+                endpoints: []
+              EOF
+              cat > /shared/eds/grpc.yaml <<'EOF'
+              resources:
+              - "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment
+                cluster_name: headscale_grpc_active
+                endpoints: []
+              EOF
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+      {{- if .Values.postgresql.enabled }}
         - name: wait-for-postgresql
           image: "{{ .Values.acl.reloadSidecar.image.repository }}:{{ .Values.acl.reloadSidecar.image.tag }}"
           imagePullPolicy: {{ .Values.acl.reloadSidecar.image.pullPolicy }}
@@ -78,14 +114,19 @@ spec:
           # templates/configmap-ha-scripts.yaml.
           command: ["/bin/sh", "/scripts/headscale-supervisor.sh"]
           env:
-            - name: HEADSCALE_DATABASE_POSTGRES_PASSWORD
+            - name: HEADSCALE_DATABASE_POSTGRES_PASS
               valueFrom:
                 secretKeyRef:
                   name: {{ include "headscale.postgresSecretName" . }}
                   key: {{ include "headscale.postgresSecretKey" . }}
             {{- with .Values.extraEnv }}
-            {{- toYaml . | nindent 12 }}
+            {{- include "headscale.renderExtraEnv" . | nindent 12 }}
             {{- end }}
+{{- if .Values.secretsEnv }}
+          envFrom:
+            - secretRef:
+                name: {{ include "headscale.fullname" . }}-extra-env
+{{- end }}
           ports:
             # Internal only - never exposed via the Service. envoy owns
             # service.httpPort/grpcPort instead and forwards to whichever
@@ -116,6 +157,11 @@ spec:
             - name: noise-key
               mountPath: /etc/headscale/noise
               readOnly: true
+{{- if .Values.headscale.derp.customMap.enabled }}
+            - name: derp-map
+              mountPath: /etc/headscale/derp-map
+              readOnly: true
+{{- end }}
             - name: data
               mountPath: /var/lib/headscale
             - name: ha-scripts
@@ -213,7 +259,9 @@ spec:
           # forwards to whichever pod currently holds the leader lock -
           # locally, or over the pod network to a sibling. The k8s Service
           # and Ingress never need to know which pod is active.
-          args: ["-c", "/etc/envoy/envoy.yaml"]
+          args:
+            - -c
+            - /etc/envoy/envoy.yaml
           ports:
             - name: http
               containerPort: {{ .Values.service.httpPort }}
@@ -270,6 +318,11 @@ spec:
             items:
               - key: {{ include "headscale.noiseSecretKey" . }}
                 path: noise_private.key
+{{- if .Values.headscale.derp.customMap.enabled }}
+        - name: derp-map
+          configMap:
+            name: {{ include "headscale.fullname" . }}-derp-map
+{{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
         {{- end }}

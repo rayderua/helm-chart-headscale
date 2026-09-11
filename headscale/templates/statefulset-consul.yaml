@@ -57,6 +57,9 @@ spec:
             - consul
             - agent
             - -config-dir=/consul/config
+{{- if .Values.ha.consul.acl.enabled }}
+            - -config-dir=/consul/config-secret
+{{- end }}
             - -advertise=$(POD_IP)
             - -client=0.0.0.0
           env:
@@ -101,8 +104,17 @@ spec:
               readOnly: true
 {{- if .Values.ha.consul.acl.enabled }}
             - name: acl-token
-              mountPath: /consul/config/acl-tokens.json
-              subPath: acl-tokens.json
+              # Mounted as its own directory, not a subPath file inside
+              # the "config" ConfigMap's mount - subPath-ing a file from
+              # one volume into a directory that's itself mounted from a
+              # DIFFERENT volume is a known-fragile combination in
+              # Kubernetes (ConfigMap/Secret volumes use an atomic-writer
+              # symlink layout that subPath bind-mounts from another
+              # volume don't reliably compose with - fails with
+              # "not a directory" or similar). Passing -config-dir twice
+              # to `consul agent` (it merges multiple config-dirs) avoids
+              # the problem entirely.
+              mountPath: /consul/config-secret
               readOnly: true
 {{- end }}
             - name: data
@@ -115,9 +127,6 @@ spec:
         - name: acl-token
           secret:
             secretName: {{ include "headscale.consulAclSecretName" . }}
-            items:
-              - key: acl-tokens.json
-                path: acl-tokens.json
 {{- end }}
 {{- if not .Values.ha.consul.persistence.enabled }}
         - name: data
