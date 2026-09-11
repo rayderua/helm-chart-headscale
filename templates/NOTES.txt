@@ -1,0 +1,36 @@
+Headscale has been deployed as a 3-pod HA StatefulSet: {{ include "headscale.fullname" . }}
+(Consul-driven leader election, {{ .Values.ha.consul.replicas }}-node bundled Consul cluster)
+
+Database:      PostgreSQL{{ if .Values.postgresql.enabled }} (bundled, on its own PVC){{ end }}
+ACL:           {{ .Values.acl.enabled }}{{ if .Values.acl.sync.enabled }} (synced from {{ .Values.acl.sync.source.type }} via headscale-pf){{ end }}
+Noise key:     {{- if .Values.noisePrivateKey.existingSecret }} existingSecret={{ .Values.noisePrivateKey.existingSecret }}
+{{- else if .Values.noisePrivateKey.value }} provided manually via values
+{{- else }} Secret/{{ include "headscale.noiseSecretName" . }} (you need to have created this yourself)
+{{- end }}
+
+Check pod status:
+  kubectl -n {{ .Release.Namespace }} get pods -l {{ include "headscale.selectorLabels" . | replace "\n" "," }}
+
+Only one of the 3 pods actually runs headscale at a time. Find out which:
+  kubectl -n {{ .Release.Namespace }} exec {{ include "headscale.fullname" . }}-0 -c consul-agent -- \
+    consul kv get -http-addr=127.0.0.1:8500 headscale/leader-pod
+
+Run `headscale` CLI commands against THAT pod (not necessarily -0):
+
+  kubectl -n {{ .Release.Namespace }} exec -it <leader-pod> -c headscale -- \
+    headscale users create myuser
+
+  kubectl -n {{ .Release.Namespace }} exec -it <leader-pod> -c headscale -- \
+    headscale preauthkeys create --user myuser --expiration 24h
+
+{{- if not .Values.acl.enabled }}
+
+ACL is currently disabled (acl.enabled=false) - all nodes can see each other without restrictions.
+{{- end }}
+{{- if .Values.postgresql.enabled }}
+
+A single-instance PostgreSQL StatefulSet was deployed alongside headscale
+({{ include "headscale.fullname" . }}-postgresql), backed by its own PVC.
+It is not highly available - for production consider an external/managed
+Postgres instance instead.
+{{- end }}

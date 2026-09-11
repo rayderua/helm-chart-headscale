@@ -1,0 +1,33 @@
+{{/*
+This ConfigMap is only used when ACLs are defined statically via values
+(without headscale-pf). When acl.sync.enabled=true, policy.mode=database
+and headscale-pf applies the policy directly via `headscale policy set`
+(gRPC), so headscale never reads this file at all.
+*/}}
+{{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+data:
+  {{- if .Values.acl.rawPolicy }}
+  # Policy provided directly by the user (rawPolicy takes precedence)
+  policy.hujson: |
+{{ .Values.acl.rawPolicy | indent 4 }}
+  {{- else }}
+  # Policy generated from the structured values.acl.policy
+  # (groups / tagOwners / hosts / acls / ssh / autoApprovers) in HuJSON
+  # format, which headscale's ACL engine understands.
+  policy.hujson: |
+    {
+      "groups": {{ .Values.acl.policy.groups | toJson }},
+      "tagOwners": {{ .Values.acl.policy.tagOwners | toJson }},
+      "hosts": {{ .Values.acl.policy.hosts | toJson }},
+      "acls": {{ .Values.acl.policy.acls | toJson }},
+      "ssh": {{ .Values.acl.policy.ssh | toJson }},
+      "autoApprovers": {{ .Values.acl.policy.autoApprovers | toJson }}
+    }
+  {{- end }}
+{{- end -}}

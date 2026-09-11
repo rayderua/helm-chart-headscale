@@ -1,0 +1,12 @@
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-template
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+    app.kubernetes.io/component: acl-sync
+data:
+  policy.hjson: |
+{{ .Values.acl.sync.policyTemplate | indent 4 }}
+{{- end -}}

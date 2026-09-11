@@ -1,0 +1,56 @@
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-script
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+    app.kubernetes.io/component: acl-sync
+data:
+  run.sh: |
+    #!/bin/sh
+    set -u
+    INTERVAL="${SYNC_INTERVAL_SECONDS:-300}"
+    APPLIED=/tmp/applied.json
+    CURRENT=/tmp/current.json
+
+    # HEADSCALE_CLI_API_KEY arrives either as a real env var (apiKey.existingSecret
+    # was set) or, by default, via a file an initContainer fetched from Consul KV.
+    if [ -z "${HEADSCALE_CLI_API_KEY:-}" ] && [ -f /shared/api-key ]; then
+      HEADSCALE_CLI_API_KEY=$(cat /shared/api-key)
+    fi
+
+    while true; do
+      TS=$(date -Is)
+      echo "[$TS] headscale-pf prepare (source=$PF_SOURCE)"
+
+      if headscale-pf prepare \
+          --source="$PF_SOURCE" \
+          --endpoint="$PF_ENDPOINT" \
+          --token="$PF_TOKEN" \
+          --input-policy=/etc/headscale-pf/policy.hjson \
+          --output-policy="$CURRENT" \
+          --output-format=json \
+          $PF_EXTRA_ARGS; then
+
+        if [ -f "$APPLIED" ] && cmp -s "$CURRENT" "$APPLIED"; then
+          echo "[$TS] no changes in the resolved policy"
+        else
+          echo "[$TS] policy changed, applying via 'headscale policy set' (live reload, no restart)"
+          if HEADSCALE_CLI_ADDRESS="$HEADSCALE_CLI_ADDRESS" \
+             HEADSCALE_CLI_API_KEY="$HEADSCALE_CLI_API_KEY" \
+             HEADSCALE_CLI_INSECURE="$HEADSCALE_CLI_INSECURE" \
+             headscale policy set -f "$CURRENT"; then
+            cp "$CURRENT" "$APPLIED"
+            echo "[$TS] policy applied successfully"
+          else
+            echo "[$TS] ERROR: failed to apply policy via headscale policy set" >&2
+          fi
+        fi
+      else
+        echo "[$TS] ERROR: headscale-pf prepare failed" >&2
+      fi
+
+      sleep "$INTERVAL"
+    done
+{{- end -}}

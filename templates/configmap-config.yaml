@@ -1,0 +1,85 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-config
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+data:
+  config.yaml: |
+    server_url: {{ .Values.headscale.serverUrl | quote }}
+    # headscale binds to internal-only ports here - envoy owns
+    # service.httpPort/grpcPort and forwards to whichever pod is leader.
+    listen_addr: {{ printf "0.0.0.0:%v" .Values.ha.internalHttpPort | quote }}
+    grpc_listen_addr: {{ printf "0.0.0.0:%v" .Values.ha.internalGrpcPort | quote }}
+    metrics_listen_addr: {{ .Values.headscale.metricsListenAddr | quote }}
+    grpc_allow_insecure: {{ .Values.headscale.grpcAllowInsecure }}
+
+    prefixes:
+      v4: {{ .Values.headscale.prefixes.v4 | quote }}
+      v6: {{ .Values.headscale.prefixes.v6 | quote }}
+
+    noise:
+      private_key_path: /etc/headscale/noise/noise_private.key
+
+    database:
+      type: postgres
+      postgres:
+        host: {{ include "headscale.postgresHost" . | quote }}
+        port: {{ include "headscale.postgresPort" . }}
+        name: {{ .Values.database.postgres.name | quote }}
+        user: {{ .Values.database.postgres.user | quote }}
+        # The password is intentionally NOT stored in this ConfigMap, it is
+        # passed via the HEADSCALE_DATABASE_POSTGRES_PASSWORD environment
+        # variable, sourced from a Secret.
+        ssl: {{ .Values.database.postgres.sslMode | quote }}
+        max_open_conns: {{ .Values.database.postgres.maxOpenConns }}
+        max_idle_conns: {{ .Values.database.postgres.maxIdleConns }}
+        conn_max_idle_time_secs: {{ .Values.database.postgres.connMaxIdleTimeSecs }}
+
+    log:
+      level: {{ .Values.headscale.logLevel | quote }}
+      format: {{ .Values.headscale.logFormat | quote }}
+
+    node:
+      ephemeral:
+        inactivity_timeout: {{ .Values.headscale.ephemeralNodeInactivityTimeout | quote }}
+    disable_check_updates: {{ .Values.headscale.disableCheckUpdates }}
+
+{{- if .Values.acl.enabled }}
+    policy:
+{{- if .Values.acl.sync.enabled }}
+      # Policy is managed by the headscale-pf daemon via `headscale policy
+      # set` (gRPC), so "database" mode is used here - headscale does not
+      # read any file from disk, and therefore needs neither a restart nor
+      # a SIGHUP when the policy changes.
+      mode: database
+{{- else }}
+      mode: file
+      path: /etc/headscale/acl/policy.hujson
+{{- end }}
+{{- end }}
+
+    dns:
+      magic_dns: {{ .Values.dns.magicDns }}
+      base_domain: {{ .Values.dns.baseDomain | quote }}
+      nameservers:
+        global:
+{{- range .Values.dns.nameservers.global }}
+          - {{ . | quote }}
+{{- end }}
+      search_domains:
+{{- range .Values.dns.searchDomains }}
+        - {{ . | quote }}
+{{- end }}
+{{- if .Values.dns.extraRecords }}
+      extra_records:
+{{- range .Values.dns.extraRecords }}
+        - name: {{ .name | quote }}
+          type: {{ .type | quote }}
+          value: {{ .value | quote }}
+{{- end }}
+{{- end }}
+
+{{- if .Values.headscale.extraConfig }}
+{{ toYaml .Values.headscale.extraConfig | indent 4 }}
+{{- end }}

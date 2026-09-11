@@ -1,0 +1,145 @@
+{{/*
+A minimal, self-contained Consul server cluster - just enough for KV +
+sessions + local health checks that back headscale's leader election. Not
+the hashicorp/consul Helm chart (no chart dependency), no ACLs, no gossip
+encryption, no TLS. Good enough for traffic confined to the cluster's
+internal network; layer ACLs/TLS on top yourself if you need more.
+*/}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "headscale.consulFullname" . }}
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+    app.kubernetes.io/component: consul-server
+spec:
+  serviceName: {{ include "headscale.consulFullname" . }}-headless
+  replicas: {{ .Values.ha.consul.replicas }}
+  podManagementPolicy: Parallel
+  selector:
+    matchLabels:
+      {{- include "headscale.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: consul-server
+  template:
+    metadata:
+      labels:
+        {{- include "headscale.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: consul-server
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-consul.yaml") . | sha256sum }}
+    spec:
+      terminationGracePeriodSeconds: 30
+      # The official image's entrypoint script tries to chown
+      # CONSUL_CONFIG_DIR/CONSUL_DATA_DIR when it starts as root (before
+      # dropping to the "consul" user itself). /consul/config here is a
+      # ConfigMap/Secret-backed mount, which Kubernetes always makes
+      # read-only - chown on it fails outright. Running as the image's
+      # built-in "consul" user (uid 100, gid 1000) from the start means
+      # that whole root->chown->drop-privileges dance in the entrypoint
+      # never triggers in the first place.
+      securityContext:
+        runAsUser: 100
+        runAsGroup: 1000
+        fsGroup: 1000
+      containers:
+        - name: consul
+          image: "{{ .Values.ha.consul.image.repository }}:{{ .Values.ha.consul.image.tag }}"
+          imagePullPolicy: {{ .Values.ha.consul.image.pullPolicy }}
+          # `command:` (not `args:`) on purpose - it replaces the image's
+          # own ENTRYPOINT (docker-entrypoint.sh) instead of layering on
+          # top of it. That script tries to chown CONSUL_CONFIG_DIR before
+          # starting, and /consul/config here is a ConfigMap/Secret-backed
+          # mount - Kubernetes always mounts those with the "ro" mount flag
+          # at the kernel level, so chown fails with "Read-only file
+          # system" for ANY user, root included; runAsUser alone doesn't
+          # fix that; skipping the script entirely does.
+          command:
+            - consul
+            - agent
+            - -config-dir=/consul/config
+            - -advertise=$(POD_IP)
+            - -client=0.0.0.0
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+          ports:
+            - name: http
+              containerPort: 8500
+            - name: serf-lan
+              containerPort: 8301
+            - name: serf-lan-udp
+              containerPort: 8301
+              protocol: UDP
+            - name: server
+              containerPort: 8300
+          readinessProbe:
+{{- if .Values.ha.consul.acl.enabled }}
+            # /v1/status/leader itself doesn't require a token, but with
+            # default_policy=deny we'd rather not depend on that - a plain
+            # TCP check is enough for a startup/liveness signal here.
+            tcpSocket:
+              port: http
+{{- else }}
+            httpGet:
+              path: /v1/status/leader
+              port: http
+{{- end }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          resources:
+            {{- toYaml .Values.ha.consul.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /consul/config
+              readOnly: true
+{{- if .Values.ha.consul.acl.enabled }}
+            - name: acl-token
+              mountPath: /consul/config/acl-tokens.json
+              subPath: acl-tokens.json
+              readOnly: true
+{{- end }}
+            - name: data
+              mountPath: /consul/data
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "headscale.consulFullname" . }}-config
+{{- if .Values.ha.consul.acl.enabled }}
+        - name: acl-token
+          secret:
+            secretName: {{ include "headscale.consulAclSecretName" . }}
+            items:
+              - key: acl-tokens.json
+                path: acl-tokens.json
+{{- end }}
+{{- if not .Values.ha.consul.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+{{- end }}
+{{- if .Values.ha.consul.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "headscale.labels" . | nindent 10 }}
+        {{- with .Values.ha.consul.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.ha.consul.persistence.accessModes | nindent 10 }}
+        {{- if .Values.ha.consul.persistence.storageClass }}
+        storageClassName: {{ .Values.ha.consul.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.ha.consul.persistence.size }}
+{{- end }}

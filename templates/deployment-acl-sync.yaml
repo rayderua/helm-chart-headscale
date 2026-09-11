@@ -1,0 +1,115 @@
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+    app.kubernetes.io/component: acl-sync
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "headscale.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: acl-sync
+  template:
+    metadata:
+      labels:
+        {{- include "headscale.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: acl-sync
+      annotations:
+        checksum/policy-template: {{ include (print $.Template.BasePath "/configmap-acl-sync-template.yaml") . | sha256sum }}
+        checksum/script: {{ include (print $.Template.BasePath "/configmap-acl-sync-script.yaml") . | sha256sum }}
+    spec:
+{{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
+      initContainers:
+        # Default path: no existingSecret was given, so the API key that
+        # the post-install Job provisioned lives in Consul KV, not a
+        # Secret. Fetch it into a shared file the main container reads at
+        # startup - retries because this Deployment and that Job aren't
+        # ordered relative to each other by Helm.
+        - name: fetch-apikey-from-consul
+          image: "{{ .Values.ha.consul.image.repository }}:{{ .Values.ha.consul.image.tag }}"
+          imagePullPolicy: {{ .Values.ha.consul.image.pullPolicy }}
+          env:
+            - name: CONSUL_HTTP_ADDR
+              value: "http://{{ include "headscale.consulServiceHttpAddr" . }}"
+{{- if .Values.ha.consul.acl.enabled }}
+            - name: CONSUL_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.consulAclSecretName" . }}
+                  key: token
+{{- end }}
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              until consul kv get {{ include "headscale.aclSyncApiKeyKvPath" . }} > /shared/api-key 2>/dev/null; do
+                echo "waiting for the headscale-pf API key to appear in Consul KV..."
+                sleep 5
+              done
+          volumeMounts:
+            - name: shared
+              mountPath: /shared
+{{- end }}
+      containers:
+        - name: headscale-pf
+          image: "{{ .Values.acl.sync.image.repository }}:{{ .Values.acl.sync.image.tag }}"
+          imagePullPolicy: {{ .Values.acl.sync.image.pullPolicy }}
+          command: ["/bin/sh", "/scripts/run.sh"]
+          env:
+            - name: SYNC_INTERVAL_SECONDS
+              value: {{ .Values.acl.sync.intervalSeconds | quote }}
+            - name: PF_SOURCE
+              value: {{ .Values.acl.sync.source.type | quote }}
+            - name: PF_ENDPOINT
+              value: {{ .Values.acl.sync.source.endpoint | quote }}
+            - name: PF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.aclSyncSourceSecretName" . }}
+                  key: {{ include "headscale.aclSyncSourceSecretKey" . }}
+            - name: PF_EXTRA_ARGS
+              value: {{ join " " .Values.acl.sync.source.extraArgs | quote }}
+            - name: HEADSCALE_CLI_ADDRESS
+              value: {{ include "headscale.grpcAddress" . | quote }}
+            - name: HEADSCALE_CLI_INSECURE
+              value: {{ .Values.acl.sync.headscale.insecure | quote }}
+{{- if .Values.acl.sync.headscale.apiKey.existingSecret }}
+            - name: HEADSCALE_CLI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.aclSyncApiKeySecretName" . }}
+                  key: {{ include "headscale.aclSyncApiKeySecretKey" . }}
+{{- end }}
+          volumeMounts:
+            - name: policy-template
+              mountPath: /etc/headscale-pf
+              readOnly: true
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+{{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
+            - name: shared
+              mountPath: /shared
+              readOnly: true
+{{- end }}
+          resources:
+            {{- toYaml .Values.acl.sync.resources | nindent 12 }}
+      volumes:
+        - name: policy-template
+          configMap:
+            name: {{ include "headscale.fullname" . }}-acl-sync-template
+        - name: script
+          configMap:
+            name: {{ include "headscale.fullname" . }}-acl-sync-script
+            defaultMode: 0755
+{{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
+        - name: shared
+          emptyDir: {}
+{{- end }}
+{{- end -}}
+

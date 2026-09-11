@@ -1,0 +1,220 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-ha-scripts
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+    app.kubernetes.io/component: ha
+data:
+  # Runs as the consul-agent sidecar's entrypoint. Starts a Consul client
+  # agent joined to the server cluster, then runs two long-lived background
+  # jobs on top of it:
+  #  - a retry loop around `consul lock`, which is how leader election
+  #    actually happens (see lock-child.sh)
+  #  - `consul watch` on the leader-address KV key, which keeps envoy's
+  #    routing target up to date on every pod, not just the leader's
+  consul-agent-entrypoint.sh: |
+    #!/bin/sh
+    set -eu
+
+    consul agent \
+      -data-dir=/consul/data \
+      -client=0.0.0.0 \
+      -bind='{{`{{ GetPrivateIP }}`}}' \
+      -retry-join="{{ include "headscale.consulJoinAddress" . }}" \
+{{- if .Values.ha.consul.acl.enabled }}
+      -token="${CONSUL_HTTP_TOKEN}" \
+{{- end }}
+      -node="$(hostname)" &
+    AGENT_PID=$!
+
+    until consul members -http-addr={{ include "headscale.consulLocalHttpAddr" . }} >/dev/null 2>&1; do
+      echo "waiting for local consul agent..."
+      sleep 2
+    done
+    # `consul members` succeeding just means the agent answers RPCs - the
+    # gossip-driven serfHealth check for THIS node can still be critical
+    # for a few more seconds after that, which makes the very first
+    # `consul lock` attempt below fail with "Check 'serfHealth' is in
+    # critical state". The outer retry loop already recovers from that on
+    # its own within a couple of seconds, but wait for this node to show
+    # up as "alive" first to avoid that noisy failed attempt most of the time.
+    until consul members -http-addr={{ include "headscale.consulLocalHttpAddr" . }} 2>/dev/null | grep -q "^$(hostname)[[:space:]].*alive"; do
+      echo "waiting for local node to be marked alive..."
+      sleep 2
+    done
+
+    # Every pod watches who the current leader is, regardless of whether
+    # this pod holds the lock itself, and keeps envoy's EDS file current.
+    # A plain poll loop with `consul kv get` (not `consul watch`, which
+    # would hand us base64-encoded JSON we'd need jq to unpack) - 1s of
+    # extra latency here is noise next to the TTL/lock-delay/headscale
+    # startup time that already dominates failover.
+    (
+      LAST=""
+      while true; do
+        CUR=$(consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} headscale/leader-addr 2>/dev/null || true)
+        if [ "$CUR" != "$LAST" ]; then
+          /scripts/render-eds.sh "$CUR"
+          LAST="$CUR"
+        fi
+        sleep 1
+      done
+    ) &
+    WATCH_PID=$!
+
+    # This pod's own attempt at becoming leader. consul lock blocks until
+    # it acquires headscale/leader, then supervises lock-child.sh for as
+    # long as the lock is held; it exits (and self-fences, see lock-child.sh)
+    # the moment the lock is lost, so we just keep retrying forever.
+    while true; do
+      # `consul lock` doesn't expose -session-ttl/-lock-delay as CLI flags
+      # (those are session-create API fields, not lock-command flags) - it
+      # creates its session with Consul's own defaults (15s TTL, 15s
+      # lock-delay), which happen to match what we'd have set anyway.
+      consul lock \
+        -http-addr={{ include "headscale.consulLocalHttpAddr" . }} \
+        -verbose \
+        -monitor-retry=3 \
+        headscale/leader \
+        /scripts/lock-child.sh || true
+      echo "lost or failed to acquire the leader lock, retrying..."
+      rm -f /shared/leader
+      sleep 2
+    done &
+    LOCK_PID=$!
+
+    trap 'kill $AGENT_PID $WATCH_PID $LOCK_PID 2>/dev/null' TERM INT
+    wait $AGENT_PID
+
+  # Supervised by `consul lock` for as long as this pod holds the leader
+  # lock. Its only jobs: (1) signal the headscale container "you're the
+  # leader" by touching a shared flag file, (2) keep polling headscale's
+  # own /health over loopback, and (3) publish this pod's address as the
+  # current leader so every pod's envoy can route to it.
+  #
+  # If this script exits for ANY reason - lock lost, headscale unhealthy -
+  # `consul lock` removes the leader-flag on our way out and releases the
+  # lock. That's the self-fencing: the moment we're not sure we're still
+  # leader, we stop claiming to be.
+  lock-child.sh: |
+    #!/bin/sh
+    set -u
+
+    cleanup() {
+      rm -f /shared/leader
+      consul kv delete -http-addr={{ include "headscale.consulLocalHttpAddr" . }} headscale/leader-addr >/dev/null 2>&1 || true
+      consul kv delete -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.leaderPodKvPath" . }} >/dev/null 2>&1 || true
+      exit 0
+    }
+    trap cleanup TERM INT
+
+    echo "acquired the leader lock - promoting this pod"
+    touch /shared/leader
+    # Envoy's EDS clusters need a literal IP, not a DNS name (EDS/STATIC
+    # clusters don't resolve hostnames the way STRICT_DNS ones do), so we
+    # publish this pod's own IP (from the downward API, POD_IP env var).
+    consul kv put -http-addr={{ include "headscale.consulLocalHttpAddr" . }} \
+      headscale/leader-addr "$POD_IP" >/dev/null
+    # Separately publish the pod NAME too (hostname == pod name for a
+    # StatefulSet) - `kubectl exec` needs a pod name, not an IP, and this is
+    # what lets things like the acl-sync API key Job find the one pod that
+    # actually has `headscale serve` running right now.
+    consul kv put -http-addr={{ include "headscale.consulLocalHttpAddr" . }} \
+      {{ include "headscale.leaderPodKvPath" . }} "$(hostname)" >/dev/null
+
+    FAILS=0
+    GRACE_LEFT={{ .Values.ha.lock.startupGraceSeconds }}
+    while true; do
+      sleep {{ .Values.ha.lock.healthCheckIntervalSeconds }}
+      if wget -q -T 2 -O /dev/null "http://127.0.0.1:9090/health"; then
+        FAILS=0
+        GRACE_LEFT=0
+      else
+        if [ "$GRACE_LEFT" -gt 0 ]; then
+          GRACE_LEFT=$((GRACE_LEFT - {{ .Values.ha.lock.healthCheckIntervalSeconds }}))
+          echo "headscale not answering yet, still within startup grace period (${GRACE_LEFT}s left) - not counting this as a failure"
+          continue
+        fi
+        FAILS=$((FAILS + 1))
+        echo "local headscale health check failed ($FAILS/{{ .Values.ha.lock.healthCheckFailThreshold }})"
+        if [ "$FAILS" -ge {{ .Values.ha.lock.healthCheckFailThreshold }} ]; then
+          echo "headscale unresponsive, releasing leadership"
+          cleanup
+        fi
+      fi
+    done
+
+  # Invoked (with the new address as $1) every time headscale/leader-addr
+  # changes, on EVERY pod. Renders the envoy EDS files; envoy watches these
+  # via inotify and picks up the new upstream without a reload/restart.
+  render-eds.sh: |
+    #!/bin/sh
+    set -eu
+    ADDR="${1:-}"
+    mkdir -p /shared/eds
+    if [ -z "$ADDR" ]; then
+      echo "no leader address published yet, leaving previous EDS in place"
+      exit 0
+    fi
+    TMP=/shared/eds/.http.yaml.tmp
+    cat > "$TMP" <<YAML
+    resources:
+    - "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment
+      cluster_name: headscale_http_active
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: ${ADDR}, port_value: {{ .Values.ha.internalHttpPort }} }
+    YAML
+    mv "$TMP" /shared/eds/http.yaml
+
+    TMP=/shared/eds/.grpc.yaml.tmp
+    cat > "$TMP" <<YAML
+    resources:
+    - "@type": type.googleapis.com/envoy.config.endpoint.v3.ClusterLoadAssignment
+      cluster_name: headscale_grpc_active
+      endpoints:
+      - lb_endpoints:
+        - endpoint:
+            address:
+              socket_address: { address: ${ADDR}, port_value: {{ .Values.ha.internalGrpcPort }} }
+    YAML
+    mv "$TMP" /shared/eds/grpc.yaml
+    echo "updated envoy EDS -> ${ADDR}"
+
+  # Runs as the headscale container's entrypoint (requires an -alpine image
+  # tag, since the default headscale/headscale image has no shell). Watches
+  # the shared leader-flag file and starts/stops the real `headscale serve`
+  # process locally as leadership is gained or lost. This is the "cold
+  # restart on promotion" piece: headscale only reads DB state at process
+  # start, so becoming leader always means starting a fresh process here,
+  # never just un-pausing an old one.
+  headscale-supervisor.sh: |
+    #!/bin/sh
+    set -u
+    HS_PID=""
+
+    stop_headscale() {
+      if [ -n "$HS_PID" ] && kill -0 "$HS_PID" 2>/dev/null; then
+        echo "stepping down: stopping local headscale (pid $HS_PID)"
+        kill "$HS_PID" 2>/dev/null
+        wait "$HS_PID" 2>/dev/null
+      fi
+      HS_PID=""
+    }
+    trap 'stop_headscale; exit 0' TERM INT
+
+    while true; do
+      if [ -f /shared/leader ]; then
+        if [ -z "$HS_PID" ] || ! kill -0 "$HS_PID" 2>/dev/null; then
+          echo "promoted: starting headscale (fresh read of DB state)"
+          headscale serve &
+          HS_PID=$!
+        fi
+      else
+        stop_headscale
+      fi
+      sleep 2
+    done

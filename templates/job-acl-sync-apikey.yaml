@@ -1,0 +1,154 @@
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled (not .Values.acl.sync.headscale.apiKey.existingSecret) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  # Only enough to check readiness and exec into the leader pod - nothing
+  # secret-related, since the result goes to Consul KV, not a k8s Secret.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/exec"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  kind: Role
+  name: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "headscale.fullname" . }}-acl-sync-apikey-gen
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "headscale.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: acl-sync-apikey-gen
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "headscale.fullname" . }}-acl-sync-apikey-job
+      containers:
+        - name: gen-apikey
+          # alpine/k8s ships curl alongside kubectl, both needed here.
+          image: "{{ .Values.helperImage.repository }}:{{ .Values.helperImage.tag }}"
+          imagePullPolicy: {{ .Values.helperImage.pullPolicy }}
+          env:
+            - name: NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: EXPIRATION
+              value: {{ .Values.acl.sync.headscale.apiKey.expiration | quote }}
+            - name: CONSUL_ADDR
+              value: {{ include "headscale.consulServiceHttpAddr" . | quote }}
+            - name: KV_PATH
+              value: {{ include "headscale.aclSyncApiKeyKvPath" . | quote }}
+            - name: LEADER_POD_KV_PATH
+              value: {{ include "headscale.leaderPodKvPath" . | quote }}
+{{- if .Values.ha.consul.acl.enabled }}
+            - name: CONSUL_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.consulAclSecretName" . }}
+                  key: token
+{{- end }}
+          command:
+            - /bin/bash
+            - -ec
+            - |
+              # Idempotent: if Consul already has a key, leave it alone -
+              # this Job re-runs on every helm upgrade (post-upgrade hook).
+              if curl -sf -H "X-Consul-Token: ${CONSUL_HTTP_TOKEN:-}" \
+                   "http://${CONSUL_ADDR}/v1/kv/${KV_PATH}" >/dev/null 2>&1; then
+                echo "API key already present in Consul KV at ${KV_PATH}, skipping"
+                exit 0
+              fi
+
+              # `headscale apikeys create` talks to the running server over
+              # its local unix socket, NOT the DB directly - so it only
+              # works on whichever pod currently has `headscale serve`
+              # actually running, i.e. the current leader, not just any
+              # pod. Consul KV is the source of truth for who that is.
+              echo "Waiting for a leader to be elected..."
+              POD_NAME=""
+              for i in $(seq 1 60); do
+                POD_NAME=$(curl -sf -H "X-Consul-Token: ${CONSUL_HTTP_TOKEN:-}" \
+                  "http://${CONSUL_ADDR}/v1/kv/${LEADER_POD_KV_PATH}?raw" 2>/dev/null || true)
+                if [ -n "$POD_NAME" ]; then
+                  break
+                fi
+                sleep 5
+              done
+              if [ -z "$POD_NAME" ]; then
+                echo "ERROR: no leader was elected in time" >&2
+                exit 1
+              fi
+              echo "Current leader: $POD_NAME"
+
+              # Small extra retry margin: the leader-pod KV key and the
+              # headscale process actually being up (headscale-supervisor.sh
+              # in the neighbouring container polls every couple seconds)
+              # aren't perfectly synchronized, so the very first exec can
+              # land slightly early.
+              KEY=""
+              for i in $(seq 1 10); do
+                KEY=$(kubectl exec -n "$NAMESPACE" "$POD_NAME" -c headscale -- \
+                  headscale apikeys create --expiration "$EXPIRATION" 2>/dev/null | tail -n1 | tr -d '\r\n')
+                if [ -n "$KEY" ]; then
+                  break
+                fi
+                echo "apikeys create failed, retrying (headscale may not have started on $POD_NAME yet)..."
+                sleep 3
+              done
+
+              if [ -z "$KEY" ]; then
+                echo "ERROR: empty API key returned" >&2
+                exit 1
+              fi
+
+              curl -sf -H "X-Consul-Token: ${CONSUL_HTTP_TOKEN:-}" \
+                --request PUT --data "$KEY" \
+                "http://${CONSUL_ADDR}/v1/kv/${KV_PATH}" >/dev/null
+
+              echo "headscale-pf API key generated and stored in Consul KV at ${KV_PATH}"
+{{- end -}}

@@ -1,0 +1,510 @@
+# -- Default values for the headscale chart --
+
+image:
+  # -- your own image with a shell baked in (needed for the HA start/stop
+  # supervisor script) - the upstream headscale/headscale image ships none.
+  repository: ghcr.io/rayderua/headscale-alpine
+  # -- chart checks repository+tag together for "alpine" as a sanity check
+  # that you're not accidentally pointing at a shell-less image; adjust
+  # that check in _helpers.tpl if your own image is named differently.
+  tag: "0.29.3"
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+nameOverride: ""
+fullnameOverride: ""
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ""
+
+podAnnotations: {}
+podLabels: {}
+podSecurityContext:
+  fsGroup: 1000
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 1000
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: false
+
+resources: {}
+  # limits:
+  #   cpu: 500m
+  #   memory: 256Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# -----------------------------------------------------------------------
+# Headscale server configuration
+# -----------------------------------------------------------------------
+headscale:
+  serverUrl: "https://headscale.example.com"
+  # -- listen_addr/grpc_listen_addr aren't configurable here: headscale
+  # always binds to ha.internalHttpPort/internalGrpcPort internally, envoy
+  # takes over service.httpPort/service.grpcPort in front of it.
+  metricsListenAddr: "0.0.0.0:9090"
+  grpcAllowInsecure: false
+
+  logLevel: info
+  logFormat: text
+
+  prefixes:
+    v4: "100.64.0.0/10"
+    v6: "fd7a:115c:a1e0::/48"
+
+  # -- rendered as node.ephemeral.inactivity_timeout in config.yaml
+  # (headscale renamed this key from the old flat
+  # ephemeral_node_inactivity_timeout at some point - keeping the values.yaml
+  # field name as-is since it's just a friendlier label)
+  ephemeralNodeInactivityTimeout: 30m
+  disableCheckUpdates: true
+
+  # -- arbitrary extra keys, merged as-is into config.yaml
+  extraConfig: {}
+
+# -----------------------------------------------------------------------
+# Database
+#
+# Always PostgreSQL - this chart only supports HA (ha always on, see
+# below), and HA needs one database shared by all 3 pods, which rules
+# sqlite out entirely (it's a local file, can't be shared across pods).
+# -----------------------------------------------------------------------
+database:
+  postgres:
+    # -- leave empty when postgresql.enabled=true: the chart fills this in
+    # automatically with the address of the bundled Postgres StatefulSet.
+    host: ""
+    port: 5432
+    name: headscale
+    user: headscale
+    sslMode: disable
+    maxOpenConns: 10
+    maxIdleConns: 10
+    connMaxIdleTimeSecs: 3600
+
+    # The password can be provided in one of two ways:
+    # 1) inline in values (the chart creates a Secret for it) - this same
+    #    Secret is also reused by the bundled Postgres server below.
+    password: ""
+    # 2) reference an existing Secret with a "password" key
+    existingSecret: ""
+    existingSecretPasswordKey: "password"
+
+# -----------------------------------------------------------------------
+# Bundled PostgreSQL server (optional)
+#
+# Spins up a single-instance PostgreSQL StatefulSet backed by its own PVC,
+# right next to headscale. This is a convenience option for small/medium
+# deployments that don't want to depend on an external managed database -
+# it is NOT highly available (single pod, single PVC).
+#
+# When enabled, database.postgres.host/port are automatically pointed at
+# this StatefulSet's Service, and database.postgres.user/name/password
+# (or existingSecret) are reused to configure the Postgres server itself,
+# so there is a single source of truth for credentials.
+# -----------------------------------------------------------------------
+postgresql:
+  enabled: false
+
+  image:
+    repository: postgres
+    tag: "16"
+    pullPolicy: IfNotPresent
+
+  service:
+    port: 5432
+
+  persistence:
+    enabled: true
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+    size: 5Gi
+    annotations: {}
+
+  resources: {}
+    # requests:
+    #   cpu: 100m
+    #   memory: 256Mi
+    # limits:
+    #   cpu: 1000m
+    #   memory: 1Gi
+
+  podSecurityContext:
+    fsGroup: 999
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 999
+
+  extraEnv: []
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# -----------------------------------------------------------------------
+# noise_private.key
+#
+# Provide it yourself - either inline (chart wraps it in a Secret) or via
+# an existing Secret you manage. This chart does not generate or rotate
+# secrets on your behalf.
+# -----------------------------------------------------------------------
+noisePrivateKey:
+  # Option A: key provided directly in values (the chart creates a Secret)
+  value: ""
+
+  # Option B (default expectation): key already lives in an existing Secret
+  existingSecret: ""
+  existingSecretKey: "noise_private.key"
+
+# -----------------------------------------------------------------------
+# DNS
+# -----------------------------------------------------------------------
+dns:
+  magicDns: true
+  baseDomain: "example.com"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+  searchDomains: []
+  # -- additional static DNS records (extraDnsRecords). Rendered directly
+  # into config.yaml; changing this updates the ConfigMap and triggers a
+  # StatefulSet rolling restart via the existing checksum/config annotation
+  # (see "reload" below) - headscale doesn't hot-reload DNS records, so
+  # there's no point pretending otherwise with extra moving parts.
+  extraRecords: []
+    # - name: "grafana.vpn.example.com"
+    #   type: "A"
+    #   value: "100.64.0.3"
+
+# -----------------------------------------------------------------------
+# ACL / policy
+#
+# Modes:
+#  1) enabled=false            - policy disabled, headscale allow-all.
+#  2) enabled=true, sync.enabled=false - static policy from structured
+#     acl.policy / acl.rawPolicy, mounted as a file (policy.mode: file).
+#     Changes are picked up by a reload sidecar via SIGHUP (no StatefulSet
+#     restart).
+#  3) enabled=true, sync.enabled=true  - policy.mode: database, live apply
+#     is done by the headscale-pf daemon
+#     (https://github.com/YouSysAdmin/headscale-pf), which pulls
+#     users/groups from Authentik (or another source) and calls
+#     `headscale policy set`, applied on the fly over the gRPC API - no
+#     restart, no SIGHUP.
+# -----------------------------------------------------------------------
+acl:
+  enabled: false
+
+  # -- structured policy for the non-sync mode (2)
+  policy:
+    groups: {}
+      # group:admins:
+      #   - "user1@example.com"
+    tagOwners: {}
+      # tag:server:
+      #   - "group:admins"
+    hosts: {}
+    acls: []
+      # - action: accept
+      #   src: ["group:admins"]
+      #   dst: ["*:*"]
+    ssh: []
+    # -- routes/exit-nodes that get approved automatically for matching
+    # users/groups/tags, instead of requiring manual `headscale nodes
+    # approve-routes`. Empty by default - nothing is auto-approved unless
+    # you list it here.
+    autoApprovers: {}
+      # routes:
+      #   "10.0.0.0/8":
+      #     - "group:admins"
+      # exitNode:
+      #   - "group:admins"
+  rawPolicy: ""
+
+  # -- SIGHUP reload sidecar for mode (2): watches the mounted policy file
+  # and sends headscale SIGHUP on change, instead of restarting the pod.
+  # Uses shareProcessNamespace, hence the separate toggle.
+  reloadSidecar:
+    enabled: true
+    image:
+      repository: busybox
+      tag: "1.36"
+      pullPolicy: IfNotPresent
+    checkIntervalSeconds: 10
+
+  # -----------------------------------------------------------------------
+  # headscale-pf: daemon that syncs users/groups from an external source
+  # (authentik/jumpcloud/ldap/keycloak) into headscale's policy.
+  # https://github.com/YouSysAdmin/headscale-pf
+  # -----------------------------------------------------------------------
+  sync:
+    enabled: false
+
+    image:
+      repository: ghcr.io/yousysadmin/headscale-pf
+      tag: "latest"
+      pullPolicy: IfNotPresent
+
+    # -- how often to run headscale-pf prepare + headscale policy set
+    intervalSeconds: 300
+
+    # -- policy template (HJSON) for headscale-pf: contains tagOwners/acls/
+    # ssh and group placeholders whose membership is pulled from the source.
+    # Left empty on purpose - fill in your own groups/rules, nothing here
+    # is auto-populated.
+    policyTemplate: |
+      {
+        "groups": {},
+        "tagOwners": {},
+        "acls": [],
+        "ssh": [],
+        "autoApprovers": {}
+      }
+
+    source:
+      # jc|jumpcloud, ak|authentik, ldap|ldaps, kk|keycloak
+      type: authentik
+      endpoint: "https://auth.example.com"
+      # -- API token for the source, inline in values (the chart creates a
+      # Secret for it)
+      token: ""
+      # -- or reference an existing Secret
+      existingSecret: ""
+      existingSecretKey: "token"
+      # -- extra flags for LDAP/Keycloak (see headscale-pf --help)
+      extraArgs: []
+        # - --keycloak-realm=master
+
+    # -- the daemon's gRPC access to headscale, used for `headscale policy set`
+    headscale:
+      grpcAddress: ""   # defaults to <fullname>-headless.<namespace>.svc:<grpcPort>
+      insecure: true    # gRPC without TLS inside the cluster
+
+      apiKey:
+        # `headscale apikeys create` connects to a running `headscale
+        # serve` over its local unix socket, not the DB directly, so it
+        # can't be pre-generated offline the way the noise key or Consul
+        # ACL token can. A post-install/post-upgrade Job asks Consul KV
+        # which of the 3 pods is currently leader, execs
+        # `headscale apikeys create` into that one, and stores the result
+        # in Consul KV (headscale/pf-api-key) rather than a k8s Secret - a
+        # Secret written imperatively by a Job is invisible to GitOps
+        # tools like Argo CD (it wasn't in the rendered manifest set, so
+        # it's either untracked or fought over on every sync/prune).
+        # Consul KV has no such problem since Argo CD has no opinion about
+        # it at all.
+        #
+        # Set existingSecret instead if you'd rather manage the key
+        # yourself; the chart then skips the Job and Consul-KV fetch
+        # entirely and reads from that Secret.
+        existingSecret: ""
+        existingSecretKey: "api-key"
+        expiration: "8760h"
+
+    resources: {}
+
+# -----------------------------------------------------------------------
+# High availability
+#
+# headscale always runs as a 3-pod StatefulSet with Consul-driven leader
+# election - there's no single-instance mode. This chart deploys a small
+# self-contained Consul cluster (server-only, official hashicorp/consul
+# image, NOT the hashicorp/consul Helm chart - no chart dependency)
+# alongside headscale, and adds two sidecars to every headscale pod:
+#   - consul-agent: a Consul client that (a) races for a KV lock to decide
+#     which pod is the leader, (b) polls headscale's own /health over
+#     loopback and releases the lock if headscale becomes unresponsive,
+#     (c) watches who the current leader is and renders a small file that
+#     the envoy sidecar uses to route traffic.
+#   - envoy: sits in front of headscale on the same ports the Service
+#     already exposes (httpPort/grpcPort) and forwards every request to
+#     whichever pod currently holds the lock - locally, or over the pod
+#     network to a sibling. This means the k8s Service and Ingress stay
+#     completely unchanged; only pods "inside" get smarter.
+#
+# Requirements:
+#   - image.tag should point at an "-alpine" variant of headscale/headscale
+#     (the default/non-alpine image ships no shell, which the in-pod
+#     start/stop supervisor script needs)
+#   - ha.consul.replicas must be odd (Raft quorum)
+#
+# This is a deliberately lightweight, single-region setup: no gossip
+# encryption or TLS between agents by default (ha.consul.acl.enabled turns
+# on basic ACL auth, see below - that's separate from gossip
+# encryption/TLS, which this chart still doesn't set up for you).
+# -----------------------------------------------------------------------
+ha:
+  # -- internal ports headscale itself binds to (only reachable pod-to-pod,
+  # never exposed via the Service - envoy takes over
+  # service.httpPort/service.grpcPort instead)
+  internalHttpPort: 8081
+  internalGrpcPort: 50444
+
+  consul:
+    # must be odd (Raft quorum): 3 tolerates 1 server down, 5 tolerates 2
+    replicas: 3
+    image:
+      repository: hashicorp/consul
+      tag: "1.19"
+      pullPolicy: IfNotPresent
+    persistence:
+      enabled: true
+      storageClass: ""
+      accessModes:
+        - ReadWriteOnce
+      size: 1Gi
+      annotations: {}
+    resources: {}
+
+    # -----------------------------------------------------------------
+    # Basic ACL: a single shared token used everywhere (servers' own
+    # initial_management/agent/default tokens, and every consul-agent
+    # sidecar). Simple, but not least-privilege - anything that can read
+    # the token Secret has full admin rights over Consul, not just
+    # headscale's own keys. Good enough to stop unauthenticated access;
+    # splitting into scoped per-purpose tokens is a natural next step this
+    # chart doesn't attempt yet.
+    #
+    # You provide the token yourself - either inline or via an existing
+    # Secret (containing both a "token" key and an "acl-tokens.json" key,
+    # see README for the exact format). This chart does not generate it
+    # for you.
+    # -----------------------------------------------------------------
+    acl:
+      enabled: false
+      token:
+        # Option A: provide the token directly (the chart creates the Secret)
+        value: ""
+        # Option B: reference an existing Secret you manage yourself
+        existingSecret: ""
+
+  consulAgent:
+    resources: {}
+
+  envoy:
+    image:
+      repository: envoyproxy/envoy
+      tag: "v1.31-latest"
+      pullPolicy: IfNotPresent
+    resources: {}
+    # -- also run an active health check from envoy itself against the
+    # current leader, as a second safety net on top of the Consul-driven
+    # endpoint updates (protects against a brief stale-EDS window)
+    activeHealthCheck:
+      enabled: true
+      intervalSeconds: 3
+      timeoutSeconds: 1
+
+  lock:
+    # sessionTTL/lockDelay are NOT actually wired anywhere below - `consul
+    # lock` (the CLI command the consul-agent sidecar uses) doesn't expose
+    # them as flags, only Consul's own session-create API does. It creates
+    # its session with Consul's built-in defaults, which happen to be 15s
+    # TTL / 15s lock-delay already - these two values just document that.
+    # If you need to actually change them, the fix is switching the
+    # consul-agent-entrypoint.sh script from `consul lock` to manual
+    # session-create + KV-acquire calls against the HTTP API.
+    sessionTTL: "15s"
+    lockDelay: "15s"
+    # local liveness polling of headscale's own /health, from the sidecar,
+    # over loopback (same pod)
+    healthCheckIntervalSeconds: 5
+    healthCheckFailThreshold: 3
+    # -- failed health checks don't count against healthCheckFailThreshold
+    # until this many seconds have passed since winning the lock - a fresh
+    # `headscale serve` needs time to open its DB connection and start
+    # listening, especially on first-ever boot (migrations). Without this,
+    # a pod can win leadership and immediately step back down before
+    # headscale even had a chance to start.
+    startupGraceSeconds: 30
+
+# -----------------------------------------------------------------------
+# Persistence (headscale's local state directory - not the database,
+# which always lives in Postgres, see above)
+# -----------------------------------------------------------------------
+persistence:
+  enabled: true
+  storageClass: ""
+  accessModes:
+    - ReadWriteOnce
+  size: 1Gi
+  annotations: {}
+
+# -----------------------------------------------------------------------
+# Reload behaviour
+#
+# checksum/config annotation triggers a StatefulSet rolling restart ONLY
+# when config.yaml itself changes (settings headscale genuinely can't
+# reload at runtime, e.g. database type, listen_addr, DNS records). ACL is
+# the one exception with its own restart-free reload path - see
+# acl.reloadSidecar / acl.sync above.
+# -----------------------------------------------------------------------
+reload:
+  enabled: true
+
+service:
+  type: ClusterIP
+  httpPort: 8080
+  grpcPort: 50443
+  metricsPort: 9090
+  annotations: {}
+
+ingress:
+  enabled: false
+  # -- routes HTTP (service.httpPort) only, on purpose. Tailscale client
+  # nodes talk to headscale over that HTTP control-plane endpoint; gRPC
+  # (service.grpcPort) is the admin/CLI API and generally isn't meant to be
+  # publicly exposed (use `kubectl exec`/port-forward for that instead). A
+  # standard k8s Ingress also doesn't proxy gRPC correctly without explicit
+  # controller-specific config (e.g. nginx's backend-protocol: "GRPC"
+  # annotation, HTTP/2 end-to-end) - if you do need remote gRPC access,
+  # that's a separate Ingress/route with that config, not this one.
+  className: ""
+  annotations: {}
+  host: "headscale.example.com"
+  tls:
+    enabled: false
+    secretName: ""
+
+serviceMonitor:
+  enabled: false
+  interval: 30s
+  additionalLabels: {}
+
+extraEnv: []
+extraVolumes: []
+extraVolumeMounts: []
+
+# -- image for the helper container used by the acl-sync API-key Job
+# (needs bash + kubectl + curl). NOT bitnami/kubectl - Bitnami reworked
+# their free catalog in 2025 and floating minor-version tags like "1.30"
+# for most bitnami/* images are gone (archived/frozen, or moved behind
+# their paid "Secure Images" catalog); alpine/k8s is actively maintained
+# for exactly this kind of CI/Job use case and bundles what we need.
+# Doesn't need to exactly match your cluster's k8s version - kubectl is
+# fine within the usual +/-1 minor version skew.
+helperImage:
+  repository: alpine/k8s
+  tag: "1.30.2"
+  pullPolicy: IfNotPresent
+
+# -- arbitrary extra Kubernetes manifests to render alongside this chart's
+# own resources (e.g. a NetworkPolicy, a PrometheusRule, an extra
+# ExternalSecret pulling noisePrivateKey/database credentials from a vault).
+# Each entry is a full manifest; `tpl` is applied, so chart values and
+# helpers (e.g. {{ include "headscale.fullname" . }}) can be used inside.
+extraManifests: []
+  # - apiVersion: v1
+  #   kind: ConfigMap
+  #   metadata:
+  #     name: '{{ include "headscale.fullname" . }}-extra'
+  #   data:
+  #     foo: bar

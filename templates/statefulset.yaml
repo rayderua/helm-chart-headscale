@@ -1,0 +1,299 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "headscale.fullname" . }}
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "headscale.fullname" . }}-headless
+  replicas: 3
+  podManagementPolicy: OrderedReady
+  selector:
+    matchLabels:
+      {{- include "headscale.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "headscale.selectorLabels" . | nindent 8 }}
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        {{- if .Values.reload.enabled }}
+        # Restarts the pod ONLY when config.yaml changes (it contains
+        # settings headscale genuinely cannot reload at runtime: listen_addr,
+        # database, noise, etc). ACL and DNS records are excluded - they are
+        # hot-reloaded without a restart (see the reload sidecar and
+        # extra_records_path).
+        checksum/config: {{ include (print $.Template.BasePath "/configmap-config.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "headscale.serviceAccountName" . }}
+      {{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) .Values.acl.reloadSidecar.enabled }}
+      # Required so the reload sidecar can send SIGHUP to the headscale
+      # process in the neighboring container instead of restarting the pod.
+      shareProcessNamespace: true
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- if .Values.postgresql.enabled }}
+      initContainers:
+        - name: wait-for-postgresql
+          image: "{{ .Values.acl.reloadSidecar.image.repository }}:{{ .Values.acl.reloadSidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.acl.reloadSidecar.image.pullPolicy }}
+          # Best-effort wait for the bundled PostgreSQL to accept connections,
+          # to avoid unnecessary CrashLoopBackOff cycles on first start.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              i=0
+              until nc -z -w2 {{ include "headscale.postgresHost" . }} {{ include "headscale.postgresPort" . }}; do
+                i=$((i+1))
+                if [ "$i" -ge 60 ]; then
+                  echo "postgresql not reachable yet, starting headscale anyway"
+                  exit 0
+                fi
+                echo "waiting for postgresql..."
+                sleep 2
+              done
+      {{- end }}
+      containers:
+        - name: headscale
+          image: "{{ include "headscale.image" . }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          # This container's PID1 is a small supervisor script (requires a
+          # shell - use an "-alpine" image.tag) that starts/stops the real
+          # `headscale serve` process based on whether the consul-agent
+          # sidecar has marked this pod as leader. See
+          # templates/configmap-ha-scripts.yaml.
+          command: ["/bin/sh", "/scripts/headscale-supervisor.sh"]
+          env:
+            - name: HEADSCALE_DATABASE_POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.postgresSecretName" . }}
+                  key: {{ include "headscale.postgresSecretKey" . }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            # Internal only - never exposed via the Service. envoy owns
+            # service.httpPort/grpcPort instead and forwards to whichever
+            # pod is currently leader on these ports.
+            - name: hs-http
+              containerPort: {{ .Values.ha.internalHttpPort }}
+            - name: hs-grpc
+              containerPort: {{ .Values.ha.internalGrpcPort }}
+            - name: metrics
+              containerPort: 9090
+          # No k8s liveness/readiness probes here on purpose: on 2 of 3 pods
+          # headscale is intentionally not running at all (standby), which
+          # would otherwise look like a crash loop. Health is monitored by
+          # the consul-agent sidecar instead (see lock-child.sh), and envoy's
+          # own active health check gates real traffic.
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/headscale/config.yaml
+              subPath: config.yaml
+              readOnly: true
+{{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) }}
+            - name: acl
+              mountPath: /etc/headscale/acl
+              readOnly: true
+{{- end }}
+            - name: noise-key
+              mountPath: /etc/headscale/noise
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/headscale
+            - name: ha-scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared
+              mountPath: /shared
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+{{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) .Values.acl.reloadSidecar.enabled }}
+        - name: acl-reloader
+          image: "{{ .Values.acl.reloadSidecar.image.repository }}:{{ .Values.acl.reloadSidecar.image.tag }}"
+          imagePullPolicy: {{ .Values.acl.reloadSidecar.image.pullPolicy }}
+          # Watches policy.hujson (updated by kubelet when the ConfigMap
+          # changes) and sends headscale SIGHUP on change - the official way
+          # for headscale to reload policy without a restart.
+          command:
+            - /bin/sh
+            - -c
+            - |
+              LAST=""
+              while true; do
+                CUR=$(sha256sum /etc/headscale/acl/policy.hujson 2>/dev/null | cut -d' ' -f1)
+                if [ -n "$CUR" ] && [ "$CUR" != "$LAST" ]; then
+                  if [ -n "$LAST" ]; then
+                    PID=""
+                    for p in /proc/[0-9]*; do
+                      if [ -r "$p/comm" ] && [ "$(cat "$p/comm" 2>/dev/null)" = "headscale" ]; then
+                        PID="${p#/proc/}"
+                        break
+                      fi
+                    done
+                    if [ -n "$PID" ]; then
+                      echo "policy.hujson changed, sending SIGHUP to headscale (pid $PID)"
+                      kill -HUP "$PID"
+                    else
+                      echo "policy.hujson changed but the headscale process was not found yet"
+                    fi
+                  fi
+                  LAST="$CUR"
+                fi
+                sleep {{ .Values.acl.reloadSidecar.checkIntervalSeconds }}
+              done
+          volumeMounts:
+            - name: acl
+              mountPath: /etc/headscale/acl
+              readOnly: true
+          resources:
+            requests:
+              cpu: 5m
+              memory: 8Mi
+            limits:
+              cpu: 20m
+              memory: 16Mi
+{{- end }}
+        - name: consul-agent
+          image: "{{ .Values.ha.consul.image.repository }}:{{ .Values.ha.consul.image.tag }}"
+          imagePullPolicy: {{ .Values.ha.consul.image.pullPolicy }}
+          # Runs a local Consul client + the leader-election lock + the
+          # leader-address watch that feeds envoy. See
+          # templates/configmap-ha-scripts.yaml for what each piece does.
+          command: ["/bin/sh", "/scripts/consul-agent-entrypoint.sh"]
+          env:
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+{{- if .Values.ha.consul.acl.enabled }}
+            - name: CONSUL_HTTP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.consulAclSecretName" . }}
+                  key: token
+{{- end }}
+          ports:
+            - name: consul-http
+              containerPort: 8500
+            - name: serf-lan
+              containerPort: 8301
+          resources:
+            {{- toYaml .Values.ha.consulAgent.resources | nindent 12 }}
+          volumeMounts:
+            - name: ha-scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: shared
+              mountPath: /shared
+            - name: consul-agent-data
+              mountPath: /consul/data
+        - name: envoy
+          image: "{{ .Values.ha.envoy.image.repository }}:{{ .Values.ha.envoy.image.tag }}"
+          imagePullPolicy: {{ .Values.ha.envoy.image.pullPolicy }}
+          # Fronts headscale on the ports the Service already exposes and
+          # forwards to whichever pod currently holds the leader lock -
+          # locally, or over the pod network to a sibling. The k8s Service
+          # and Ingress never need to know which pod is active.
+          args: ["-c", "/etc/envoy/envoy.yaml"]
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.httpPort }}
+            - name: grpc
+              containerPort: {{ .Values.service.grpcPort }}
+          resources:
+            {{- toYaml .Values.ha.envoy.resources | nindent 12 }}
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            - name: shared
+              mountPath: /shared
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "headscale.fullname" . }}-config
+        - name: ha-scripts
+          configMap:
+            name: {{ include "headscale.fullname" . }}-ha-scripts
+            defaultMode: 0755
+        - name: envoy-config
+          configMap:
+            name: {{ include "headscale.fullname" . }}-envoy
+        # emptyDir shared between the headscale, consul-agent and envoy
+        # containers in this pod: the leader flag file, and the EDS files
+        # envoy watches. Never needs to survive a pod restart.
+        - name: shared
+          emptyDir: {}
+        # Client-mode consul agent data - no Raft log here (that's only on
+        # the server StatefulSet), fine to be ephemeral.
+        - name: consul-agent-data
+          emptyDir: {}
+{{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) }}
+        - name: acl
+          configMap:
+            name: {{ include "headscale.fullname" . }}-acl
+{{- end }}
+        - name: noise-key
+          secret:
+            secretName: {{ include "headscale.noiseSecretName" . }}
+            items:
+              - key: {{ include "headscale.noiseSecretKey" . }}
+                path: noise_private.key
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+{{- if not .Values.persistence.enabled }}
+        - name: data
+          emptyDir: {}
+{{- end }}
+{{- if .Values.persistence.enabled }}
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          {{- include "headscale.labels" . | nindent 10 }}
+        {{- with .Values.persistence.annotations }}
+        annotations:
+          {{- toYaml . | nindent 10 }}
+        {{- end }}
+      spec:
+        accessModes:
+          {{- toYaml .Values.persistence.accessModes | nindent 10 }}
+        {{- if .Values.persistence.storageClass }}
+        storageClassName: {{ .Values.persistence.storageClass }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size }}
+{{- end }}
