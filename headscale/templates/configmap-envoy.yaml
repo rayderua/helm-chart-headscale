@@ -16,7 +16,7 @@ data:
   # a node identity even for local file-delivered config, not just real
   # xDS. --service-node/--service-cluster CLI flags are documented as an
   # alternative but didn't actually satisfy this in practice - a real
-  # static value here does. Same on all 3 pods (this ConfigMap is shared)
+  # static value here does. Same on all pods (this ConfigMap is shared)
   # - fine for our purposes, you already know which pod's Envoy you're
   # looking at from kubectl context.
   envoy.yaml: |

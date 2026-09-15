@@ -23,13 +23,26 @@ spec:
         checksum/policy-template: {{ include (print $.Template.BasePath "/configmap-acl-sync-template.yaml") . | sha256sum }}
         checksum/script: {{ include (print $.Template.BasePath "/configmap-acl-sync-script.yaml") . | sha256sum }}
     spec:
+      # headscale-pf (currently defaults to root) and curlimages/curl
+      # (defaults to uid 100) run as DIFFERENT users by default - fsGroup
+      # alone only fixes group ownership, not the file's permission bits,
+      # so if headscale-pf writes current.json with a restrictive mode
+      # (owner-only), group access doesn't help at all. Forcing both
+      # containers to the SAME uid/gid sidesteps that: whatever mode the
+      # file gets, its owner (now identical for both) can always read it.
+      securityContext:
+        runAsUser: {{ .Values.acl.sync.uid }}
+        runAsGroup: {{ .Values.acl.sync.uid }}
+        runAsNonRoot: true
+        fsGroup: {{ .Values.acl.sync.uid }}
 {{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
       initContainers:
-        # Default path: no existingSecret was given, so the API key that
-        # the post-install Job provisioned lives in Consul KV, not a
-        # Secret. Fetch it into a shared file the main container reads at
-        # startup - retries because this Deployment and that Job aren't
-        # ordered relative to each other by Helm.
+        # Default path: no existingSecret was given, so the API key
+        # (provisioned entirely from inside the leader pod - see
+        # lock-child.sh/headscale-supervisor.sh) lives in Consul KV, not a
+        # Secret. Fetch it into a shared file the applier container reads
+        # at startup - retries because this Deployment and that
+        # provisioning aren't ordered relative to each other by Helm.
         - name: fetch-apikey-from-consul
           image: "{{ .Values.ha.consul.image.repository }}:{{ .Values.ha.consul.image.tag }}"
           imagePullPolicy: {{ .Values.ha.consul.image.pullPolicy }}
@@ -56,10 +69,13 @@ spec:
               mountPath: /shared
 {{- end }}
       containers:
+        # Only resolves the policy (headscale-pf prepare) - no HTTP client
+        # needed, so this container's image never needs to ship curl. See
+        # configmap-acl-sync-script.yaml for why this is split from apply.
         - name: headscale-pf
           image: "{{ .Values.acl.sync.image.repository }}:{{ .Values.acl.sync.image.tag }}"
           imagePullPolicy: {{ .Values.acl.sync.image.pullPolicy }}
-          command: ["/bin/sh", "/scripts/run.sh"]
+          command: ["/bin/sh", "/scripts/prepare.sh"]
           env:
             - name: SYNC_INTERVAL_SECONDS
               value: {{ .Values.acl.sync.intervalSeconds | quote }}
@@ -74,17 +90,6 @@ spec:
                   key: {{ include "headscale.aclSyncSourceSecretKey" . }}
             - name: PF_EXTRA_ARGS
               value: {{ join " " .Values.acl.sync.source.extraArgs | quote }}
-            - name: HEADSCALE_CLI_ADDRESS
-              value: {{ include "headscale.grpcAddress" . | quote }}
-            - name: HEADSCALE_CLI_INSECURE
-              value: {{ .Values.acl.sync.headscale.insecure | quote }}
-{{- if .Values.acl.sync.headscale.apiKey.existingSecret }}
-            - name: HEADSCALE_CLI_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "headscale.aclSyncApiKeySecretName" . }}
-                  key: {{ include "headscale.aclSyncApiKeySecretKey" . }}
-{{- end }}
           volumeMounts:
             - name: policy-template
               mountPath: /etc/headscale-pf
@@ -92,11 +97,33 @@ spec:
             - name: script
               mountPath: /scripts
               readOnly: true
-{{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
             - name: shared
               mountPath: /shared
-              readOnly: true
+          resources:
+            {{- toYaml .Values.acl.sync.resources | nindent 12 }}
+        # Watches the file the headscale-pf container writes and PUTs it to
+        # headscale's REST API whenever it changes. curlimages/curl on
+        # purpose - the one thing this container needs is a guaranteed curl.
+        - name: policy-applier
+          image: "{{ .Values.acl.sync.applyImage.repository }}:{{ .Values.acl.sync.applyImage.tag }}"
+          imagePullPolicy: {{ .Values.acl.sync.applyImage.pullPolicy }}
+          command: ["/bin/sh", "/scripts/apply.sh"]
+          env:
+            - name: HEADSCALE_API_URL
+              value: {{ include "headscale.httpApiAddress" . | quote }}
+{{- if .Values.acl.sync.headscale.apiKey.existingSecret }}
+            - name: HEADSCALE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "headscale.aclSyncApiKeySecretName" . }}
+                  key: {{ include "headscale.aclSyncApiKeySecretKey" . }}
 {{- end }}
+          volumeMounts:
+            - name: script
+              mountPath: /scripts
+              readOnly: true
+            - name: shared
+              mountPath: /shared
           resources:
             {{- toYaml .Values.acl.sync.resources | nindent 12 }}
       volumes:
@@ -107,9 +134,8 @@ spec:
           configMap:
             name: {{ include "headscale.fullname" . }}-acl-sync-script
             defaultMode: 0755
-{{- if not .Values.acl.sync.headscale.apiKey.existingSecret }}
+        # Shared between headscale-pf and policy-applier: the resolved
+        # policy file, and (when applicable) the fetched API key.
         - name: shared
           emptyDir: {}
-{{- end }}
 {{- end -}}
-

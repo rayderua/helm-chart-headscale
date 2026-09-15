@@ -143,7 +143,7 @@ headscale:
 # Database
 #
 # Always PostgreSQL - this chart only supports HA (ha always on, see
-# below), and HA needs one database shared by all 3 pods, which rules
+# below), and HA needs one database shared by all pods, which rules
 # sqlite out entirely (it's a local file, can't be shared across pods).
 # -----------------------------------------------------------------------
 database:
@@ -270,17 +270,21 @@ dns:
 #     acl.policy / acl.rawPolicy, mounted as a file (policy.mode: file).
 #     Changes are picked up by a reload sidecar via SIGHUP (no StatefulSet
 #     restart).
-#  3) enabled=true, sync.enabled=true  - policy.mode: database, live apply
-#     is done by the headscale-pf daemon
-#     (https://github.com/YouSysAdmin/headscale-pf), which pulls
-#     users/groups from Authentik (or another source) and calls
-#     `headscale policy set`, applied on the fly over the gRPC API - no
-#     restart, no SIGHUP.
+#  3) enabled=true, sync.enabled=true  - same acl.policy/rawPolicy, but
+#     used as a TEMPLATE: policy.mode: database, live apply is done by the
+#     headscale-pf daemon (https://github.com/YouSysAdmin/headscale-pf),
+#     which resolves group membership from Authentik (or another source)
+#     and applies it via a PUT to headscale's REST API
+#     (/api/v1/policy) - no restart, no SIGHUP.
 # -----------------------------------------------------------------------
 acl:
   enabled: false
 
-  # -- structured policy for the non-sync mode (2)
+  # -- structured policy - single source of truth for BOTH modes (2) and
+  # (3) below: static mode mounts it as a file as-is, sync mode hands it
+  # to headscale-pf as a template it may partially overwrite (see
+  # acl.sync.source below). acl.rawPolicy (further down) takes precedence
+  # over this in both modes when set.
   policy:
     groups: {}
       # group:admins:
@@ -330,21 +334,33 @@ acl:
       tag: "latest"
       pullPolicy: IfNotPresent
 
-    # -- how often to run headscale-pf prepare + headscale policy set
+    # -- image for the policy-applier sidecar, which does the actual
+    # `curl PUT /api/v1/policy` call. Deliberately NOT the same image as
+    # above - the headscale-pf image isn't guaranteed to ship curl (the
+    # default one doesn't), so this is split into its own container using
+    # an image that's guaranteed to have it.
+    applyImage:
+      repository: curlimages/curl
+      tag: "8.11.0"
+      pullPolicy: IfNotPresent
+
+    # -- forces headscale-pf and curlimages/curl onto the SAME uid/gid
+    # (used for runAsUser/runAsGroup/fsGroup together) - they default to
+    # different users (root vs uid 100), and fsGroup alone doesn't help if
+    # headscale-pf writes current.json with a restrictive owner-only mode;
+    # same uid means whichever mode the file gets, both containers can
+    # read it as its owner.
+    uid: 1000
+
+    # -- how often to run headscale-pf prepare + apply via the REST API
     intervalSeconds: 300
 
-    # -- policy template (HJSON) for headscale-pf: contains tagOwners/acls/
-    # ssh and group placeholders whose membership is pulled from the source.
-    # Left empty on purpose - fill in your own groups/rules, nothing here
-    # is auto-populated.
-    policyTemplate: |
-      {
-        "groups": {},
-        "tagOwners": {},
-        "acls": [],
-        "ssh": [],
-        "autoApprovers": {}
-      }
+    # -- policy template for headscale-pf: NOT a separate field - reuses
+    # acl.policy/acl.rawPolicy above (same values, same rendering, single
+    # source of truth). In this mode headscale-pf treats it as a
+    # TEMPLATE: it resolves group membership from source below and may
+    # overwrite whatever you put in acl.policy.groups; tagOwners/acls/
+    # ssh/autoApprovers pass through as you wrote them.
 
     source:
       # jc|jumpcloud, ak|authentik, ldap|ldaps, kk|keycloak
@@ -360,10 +376,15 @@ acl:
       extraArgs: []
         # - --keycloak-realm=master
 
-    # -- the daemon's gRPC access to headscale, used for `headscale policy set`
+    # -- the daemon reaches headscale over its HTTP REST API (PUT
+    # /api/v1/policy), not gRPC: headscale's gRPC remote access hard-requires
+    # TLS ("Currently for a remote CLI you have no choice but to setup TLS" -
+    # juanfont/headscale#1709), which this cluster's plaintext-internal Envoy
+    # mesh doesn't provide, and layering TLS on just for this wasn't worth
+    # it. The REST API has no such requirement - same Bearer-token auth,
+    # plain HTTP is fine.
     headscale:
-      grpcAddress: ""   # defaults to <fullname>-headless.<namespace>.svc:<grpcPort>
-      insecure: true    # gRPC without TLS inside the cluster
+      apiUrl: ""   # defaults to http://<fullname>.<namespace>.svc:<httpPort>
 
       apiKey:
         # `headscale apikeys create` connects to a running `headscale
@@ -396,7 +417,7 @@ acl:
 # -----------------------------------------------------------------------
 # High availability
 #
-# headscale always runs as a 3-pod StatefulSet with Consul-driven leader
+# headscale always runs as an HA StatefulSet (ha.replicas pods) with Consul-driven leader
 # election - there's no single-instance mode. This chart deploys a small
 # self-contained Consul cluster (server-only, official hashicorp/consul
 # image, NOT the hashicorp/consul Helm chart - no chart dependency)
@@ -424,6 +445,13 @@ acl:
 # encryption/TLS, which this chart still doesn't set up for you).
 # -----------------------------------------------------------------------
 ha:
+  # -- number of headscale pods (active/standby via Consul-driven leader
+  # election - not a quorum count, headscale pods don't vote on anything
+  # themselves, so this doesn't need to be odd. Just how many spare
+  # standbys you want on hand. ha.consul.replicas below is the one that
+  # actually needs to stay odd.
+  replicas: 2
+
   # -- internal ports headscale itself binds to (only reachable pod-to-pod,
   # never exposed via the Service - envoy takes over
   # service.httpPort/service.grpcPort instead)

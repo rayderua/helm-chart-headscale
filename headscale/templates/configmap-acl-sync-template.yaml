@@ -1,3 +1,13 @@
+{{/*
+Same acl.policy/acl.rawPolicy values as configmap-acl.yaml (static mode),
+rendered through the same headscale.renderAclPolicy helper - one source
+of truth for "what does our ACL policy look like" regardless of mode.
+
+Mode-specific caveat: headscale-pf treats this as a TEMPLATE, not final
+content - it resolves group membership from your external source
+(Authentik/LDAP/etc) and may overwrite whatever you put in acl.policy.groups
+here. tagOwners/acls/ssh/autoApprovers pass through as you wrote them.
+*/}}
 {{- if and .Values.acl.enabled .Values.acl.sync.enabled -}}
 apiVersion: v1
 kind: ConfigMap
@@ -8,5 +18,5 @@ metadata:
     app.kubernetes.io/component: acl-sync
 data:
   policy.hjson: |
-{{ .Values.acl.sync.policyTemplate | indent 4 }}
+{{ include "headscale.renderAclPolicy" . | indent 4 }}
 {{- end -}}

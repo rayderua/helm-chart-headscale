@@ -1,7 +1,7 @@
 # headscale Helm chart
 
 A Helm chart for running your own [Headscale](https://github.com/juanfont/headscale)
-(self-hosted Tailscale control server), **always as a 3-pod HA StatefulSet**
+(self-hosted Tailscale control server), **always as an HA StatefulSet** (`ha.replicas` pods, 2 by default)
 with Consul-driven leader election and an Envoy sidecar mesh for traffic
 routing. No `hashicorp/consul` chart dependency, no external load
 balancer in front of the StatefulSet - everything needed lives in this
@@ -9,7 +9,7 @@ one chart.
 
 There is no single-instance mode. If that's what you want, this probably
 isn't the right chart for you - the whole design (Consul, Envoy, the
-supervisor script) exists specifically to make 3-pod active/standby work.
+supervisor script) exists specifically to make active/standby work across pods.
 
 ## Table of contents
 
@@ -67,7 +67,7 @@ supervisor script) exists specifically to make 3-pod active/standby work.
   or the tag, as a sanity check.
 - PostgreSQL - either the bundled one (`postgresql.enabled: true`) or an
   external instance. No sqlite support; a local-file database can't be
-  shared across 3 HA pods.
+  shared across HA pods.
 - A `noise_private.key` you generated yourself (`noisePrivateKey.value` or
   `.existingSecret`).
 - A DERP source - `headscale.derp.urls` or `headscale.derp.customMap`
@@ -199,25 +199,32 @@ Three modes, `acl.enabled` + `acl.sync.enabled`:
    separate `Deployment` running
    [headscale-pf](https://github.com/YouSysAdmin/headscale-pf), which on
    a schedule (`acl.sync.intervalSeconds`) pulls groups/users from
-   Authentik/Jumpcloud/LDAP/Keycloak (`acl.sync.source.*`), fills them
-   into a policy template (`acl.sync.policyTemplate`, HJSON, empty by
-   default - nothing auto-populated), and applies the result via
-   `headscale policy set` over gRPC - a live reload, no restart, no
-   SIGHUP. `policy.mode: database` in this mode - headscale never reads a
-   local policy file at all.
+   Authentik/Jumpcloud/LDAP/Keycloak (`acl.sync.source.*`) and resolves
+   them against the **same `acl.policy`/`acl.rawPolicy` as mode 2 above**
+   - no separate template field. headscale-pf treats it as a template in
+   this mode: it may overwrite whatever you put in `acl.policy.groups`
+   with real membership from your source (`tagOwners`/`acls`/`ssh`/
+   `autoApprovers` pass through as written). The result is applied via a
+   `curl` `PUT` to headscale's REST API (`/api/v1/policy`, Bearer-token
+   auth) - a live reload, no restart, no SIGHUP. Deliberately **not**
+   gRPC: headscale's gRPC remote access hard-requires TLS
+   ("Currently for a remote CLI you have no choice but to setup TLS" -
+   [juanfont/headscale#1709](https://github.com/juanfont/headscale/issues/1709)),
+   which this cluster's plaintext-internal Envoy mesh doesn't provide, and
+   the REST API has no such requirement. `policy.mode: database` in this
+   mode - headscale never reads a local policy file at all.
 
-   The daemon needs a headscale API key for gRPC access, which can't be
-   pre-generated offline (`headscale apikeys create` talks to a running
-   `headscale serve` over its local unix socket, not the database
-   directly, and only works on whichever pod is currently leader). No
-   external Job, no `kubectl exec`, no pod-exec RBAC: whichever pod's
-   `consul-agent` sidecar currently holds the lock notices Consul KV is
-   missing the key and asks the `headscale` container next door - the
-   only container with actual access to the headscale binary - to run the
-   CLI command locally, handing the result back over a file on their
-   shared volume. The result lands in Consul KV (`headscale/pf-api-key`),
-   not a Kubernetes Secret (see
-   [Secrets you need to create yourself](#secrets-you-need-to-create-yourself)
+   The daemon needs a headscale API key, which can't be pre-generated
+   offline (`headscale apikeys create` talks to a running `headscale
+   serve` over its local unix socket, not the database directly, and only
+   works on whichever pod is currently leader). No external Job, no
+   `kubectl exec`, no pod-exec RBAC: whichever pod's `consul-agent`
+   sidecar currently holds the lock notices Consul KV is missing the key
+   and asks the `headscale` container next door - the only container with
+   actual access to the headscale binary - to run the CLI command locally,
+   handing the result back over a file on their shared volume. The result
+   lands in Consul KV (`headscale/pf-api-key`), not a Kubernetes Secret
+   (see [Secrets you need to create yourself](#secrets-you-need-to-create-yourself)
    for why), and self-heals - if the key is ever missing for any reason,
    the next pass re-requests it, no `helm upgrade` needed. Set
    `acl.sync.headscale.apiKey.existingSecret` instead if you'd rather
@@ -239,19 +246,19 @@ acl:
 ```yaml
 acl:
   enabled: true
+  policy:
+    groups:
+      group:admins: []   # headscale-pf fills this in from Authentik
+    acls:
+      - action: accept
+        src: ["group:admins"]
+        dst: ["*:*"]
   sync:
     enabled: true
     source:
       type: authentik
       endpoint: "https://auth.example.com"
       token: "CHANGE_ME"   # or source.existingSecret
-    policyTemplate: |
-      {
-        "groups": { "group:admins": [] },
-        "acls": [
-          {"action": "accept", "src": ["group:admins"], "dst": ["*:*"]}
-        ]
-      }
 ```
 
 ## DNS
