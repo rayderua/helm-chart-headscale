@@ -3,7 +3,29 @@ entries:
   headscale:
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-09-15T11:40:27.618233253Z"
+    created: "2026-09-15T11:40:52.966060759Z"
+    description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
+      leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
+      optional bundled PostgreSQL
+    digest: d989110aa1aa9b282a61cfe9d7d90829cd005aa68395b7753716488afe645edf
+    home: https://github.com/juanfont/headscale
+    keywords:
+    - headscale
+    - tailscale
+    - wireguard
+    - vpn
+    maintainers:
+    - name: platform-team
+    name: headscale
+    sources:
+    - https://github.com/juanfont/headscale
+    type: application
+    urls:
+    - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.0.tgz
+    version: 0.1.0
+  - apiVersion: v2
+    appVersion: 0.29.3
+    created: "2026-09-15T11:40:52.962847323Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -23,4 +45,4 @@ entries:
     urls:
     - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.0-dev.3+f7c56ef.tgz
     version: 0.1.0-dev.3+f7c56ef
-generated: "2026-09-15T11:40:27.616262162Z"
+generated: "2026-09-15T11:40:52.960862773Z"
