@@ -151,12 +151,16 @@ api-key
 {{- end -}}
 {{- end -}}
 
-{{/* gRPC address for headscale-pf -> headscale */}}
-{{- define "headscale.grpcAddress" -}}
-{{- if .Values.acl.sync.headscale.grpcAddress -}}
-{{- .Values.acl.sync.headscale.grpcAddress -}}
+{{/* HTTP API base URL for headscale-pf -> headscale (REST, not gRPC - see
+values.yaml acl.sync.headscale for why: headscale's gRPC remote access
+requires TLS, its REST API doesn't). Goes through the regular Service (not
+headless) - Envoy answers identically on every pod regardless, so there's
+no need for per-pod headless resolution here. */}}
+{{- define "headscale.httpApiAddress" -}}
+{{- if .Values.acl.sync.headscale.apiUrl -}}
+{{- .Values.acl.sync.headscale.apiUrl -}}
 {{- else -}}
-{{- printf "%s-headless.%s.svc:%v" (include "headscale.fullname" .) .Release.Namespace .Values.service.grpcPort -}}
+{{- printf "http://%s.%s.svc:%v" (include "headscale.fullname" .) .Release.Namespace .Values.service.httpPort -}}
 {{- end -}}
 {{- end -}}
 
@@ -229,6 +233,23 @@ path here yet, it needs a whole separate story around exposing STUN
 {{- $hasCustomMap := .Values.headscale.derp.customMap.enabled -}}
 {{- if not (or $hasUrls $hasCustomMap) -}}
 {{ fail "headscale.derp: no DERP source configured, and this chart won't silently default to Tailscale's public relays for a self-hosted deployment. Set ONE of: headscale.derp.urls (use a public/third-party DERP map) or headscale.derp.customMap.enabled: true (bring your own DERP map)." }}
+{{- end -}}
+{{- end -}}
+
+{{/* Single source of truth for ACL policy JSON, used by BOTH the static
+(policy.mode: file) and sync (headscale-pf --input-policy) paths -
+acl.rawPolicy takes precedence when set, otherwise built field-by-field
+from the structured acl.policy so each value gets its own toJson call
+(cleaner errors on a bad type than json-ing the whole map at once). Note
+for sync mode specifically: `groups` here is a seed/template for
+headscale-pf, not guaranteed final content - headscale-pf resolves group
+membership from your external source and may overwrite whatever you put
+here. Everything else passes through as written. */}}
+{{- define "headscale.renderAclPolicy" -}}
+{{- if .Values.acl.rawPolicy -}}
+{{ .Values.acl.rawPolicy }}
+{{- else -}}
+{{ .Values.acl.policy | toJson }}
 {{- end -}}
 {{- end -}}
 

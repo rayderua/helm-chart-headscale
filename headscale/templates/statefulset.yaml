@@ -6,7 +6,7 @@ metadata:
     {{- include "headscale.labels" . | nindent 4 }}
 spec:
   serviceName: {{ include "headscale.fullname" . }}-headless
-  replicas: 3
+  replicas: {{ .Values.ha.replicas }}
   podManagementPolicy: OrderedReady
   selector:
     matchLabels:
@@ -137,7 +137,7 @@ spec:
               containerPort: {{ .Values.ha.internalGrpcPort }}
             - name: metrics
               containerPort: 9090
-          # No k8s liveness/readiness probes here on purpose: on 2 of 3 pods
+          # No k8s liveness/readiness probes here on purpose: only one of ha.replicas pods
           # headscale is intentionally not running at all (standby), which
           # would otherwise look like a crash loop. Health is monitored by
           # the consul-agent sidecar instead (see lock-child.sh), and envoy's
@@ -252,6 +252,11 @@ spec:
               mountPath: /shared
             - name: consul-agent-data
               mountPath: /consul/data
+{{- if .Values.ha.consul.acl.enabled }}
+            - name: acl-token
+              mountPath: /consul-agent-config
+              readOnly: true
+{{- end }}
         - name: envoy
           image: "{{ .Values.ha.envoy.image.repository }}:{{ .Values.ha.envoy.image.tag }}"
           imagePullPolicy: {{ .Values.ha.envoy.image.pullPolicy }}
@@ -307,6 +312,15 @@ spec:
         # the server StatefulSet), fine to be ephemeral.
         - name: consul-agent-data
           emptyDir: {}
+{{- if .Values.ha.consul.acl.enabled }}
+        # Mounted as its own directory (not subPath) - same reasoning as
+        # the Consul server's mount: subPath-ing a file from one volume
+        # into a directory backed by a different volume is a known-fragile
+        # combination in Kubernetes.
+        - name: acl-token
+          secret:
+            secretName: {{ include "headscale.consulAclSecretName" . }}
+{{- end }}
 {{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) }}
         - name: acl
           configMap:

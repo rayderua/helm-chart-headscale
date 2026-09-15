@@ -7,18 +7,19 @@ metadata:
     {{- include "headscale.labels" . | nindent 4 }}
     app.kubernetes.io/component: acl-sync
 data:
-  run.sh: |
+  # Runs in the "headscale-pf" container. Only resolves the policy from the
+  # source and writes it to the shared volume - no HTTP client needed here
+  # at all, so this container's image only ever needs headscale-pf's own
+  # binary + a shell. Applying the result is a SEPARATE container/script
+  # (apply.sh) specifically because we can't assume this image ships curl
+  # (it didn't, for the default image) - splitting responsibility means we
+  # get to pick an image we're actually sure has curl for that part,
+  # instead of gambling on this one.
+  prepare.sh: |
     #!/bin/sh
     set -u
     INTERVAL="${SYNC_INTERVAL_SECONDS:-300}"
-    APPLIED=/tmp/applied.json
-    CURRENT=/tmp/current.json
-
-    # HEADSCALE_CLI_API_KEY arrives either as a real env var (apiKey.existingSecret
-    # was set) or, by default, via a file an initContainer fetched from Consul KV.
-    if [ -z "${HEADSCALE_CLI_API_KEY:-}" ] && [ -f /shared/api-key ]; then
-      HEADSCALE_CLI_API_KEY=$(cat /shared/api-key)
-    fi
+    CURRENT=/shared/current.json
 
     while true; do
       TS=$(date -Is)
@@ -32,25 +33,62 @@ data:
           --output-policy="$CURRENT" \
           --output-format=json \
           $PF_EXTRA_ARGS; then
-
-        if [ -f "$APPLIED" ] && cmp -s "$CURRENT" "$APPLIED"; then
-          echo "[$TS] no changes in the resolved policy"
-        else
-          echo "[$TS] policy changed, applying via 'headscale policy set' (live reload, no restart)"
-          if HEADSCALE_CLI_ADDRESS="$HEADSCALE_CLI_ADDRESS" \
-             HEADSCALE_CLI_API_KEY="$HEADSCALE_CLI_API_KEY" \
-             HEADSCALE_CLI_INSECURE="$HEADSCALE_CLI_INSECURE" \
-             headscale policy set -f "$CURRENT"; then
-            cp "$CURRENT" "$APPLIED"
-            echo "[$TS] policy applied successfully"
-          else
-            echo "[$TS] ERROR: failed to apply policy via headscale policy set" >&2
-          fi
-        fi
+        echo "[$TS] wrote resolved policy to $CURRENT"
       else
         echo "[$TS] ERROR: headscale-pf prepare failed" >&2
       fi
 
       sleep "$INTERVAL"
+    done
+
+  # Runs in the "policy-applier" container (curlimages/curl - guaranteed to
+  # have curl, unlike the headscale-pf image). Watches the file prepare.sh
+  # writes and PUTs it to headscale's REST API whenever it changes.
+  apply.sh: |
+    #!/bin/sh
+    set -u
+    CURRENT=/shared/current.json
+    APPLIED=/tmp/applied.json
+
+    # HEADSCALE_API_TOKEN arrives either as a real env var (apiKey.existingSecret
+    # was set) or, by default, via a file an initContainer fetched from Consul KV.
+    if [ -z "${HEADSCALE_API_TOKEN:-}" ] && [ -f /shared/api-key ]; then
+      HEADSCALE_API_TOKEN=$(cat /shared/api-key)
+    fi
+
+    # JSON-string-escape stdin (no surrounding quotes added) for embedding
+    # as a value in a hand-built JSON body. curlimages/curl has no python3,
+    # so this is sed/awk only - covers the characters headscale-pf's own
+    # JSON output can realistically contain.
+    json_escape() {
+      sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/\t/\\t/g' -e 's/\r/\\r/g' \
+        | sed -e ':a' -e 'N' -e '$!ba' -e 's/\n/\\n/g'
+    }
+
+    while true; do
+      TS=$(date -Is)
+      if [ -f "$CURRENT" ]; then
+        if [ -f "$APPLIED" ] && cmp -s "$CURRENT" "$APPLIED"; then
+          : # no changes since last apply
+        else
+          echo "[$TS] policy changed, applying via the REST API (PUT /api/v1/policy) - live reload, no restart"
+          ESCAPED=$(json_escape < "$CURRENT")
+          printf '{"policy":"%s"}' "$ESCAPED" > /tmp/policy-request.json
+          HTTP_CODE=$(curl -s -o /tmp/policy-response.json -w '%{http_code}' \
+            -X PUT \
+            -H "Authorization: Bearer ${HEADSCALE_API_TOKEN}" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/policy-request.json \
+            "${HEADSCALE_API_URL}/api/v1/policy")
+          if [ "$HTTP_CODE" = "200" ]; then
+            cp "$CURRENT" "$APPLIED"
+            echo "[$TS] policy applied successfully"
+          else
+            echo "[$TS] ERROR: applying policy failed (HTTP $HTTP_CODE)" >&2
+            cat /tmp/policy-response.json >&2 2>/dev/null || true
+          fi
+        fi
+      fi
+      sleep "${APPLY_POLL_SECONDS:-10}"
     done
 {{- end -}}

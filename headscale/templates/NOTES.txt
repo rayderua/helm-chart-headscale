@@ -1,4 +1,4 @@
-Headscale has been deployed as a 3-pod HA StatefulSet: {{ include "headscale.fullname" . }}
+Headscale has been deployed as an HA StatefulSet ({{ .Values.ha.replicas }} pods): {{ include "headscale.fullname" . }}
 (Consul-driven leader election, {{ .Values.ha.consul.replicas }}-node bundled Consul cluster)
 
 Database:      PostgreSQL{{ if .Values.postgresql.enabled }} (bundled, on its own PVC){{ end }}
@@ -11,7 +11,7 @@ Noise key:     {{- if .Values.noisePrivateKey.existingSecret }} existingSecret={
 Check pod status:
   kubectl -n {{ .Release.Namespace }} get pods -l app.kubernetes.io/component=headscale,{{ include "headscale.selectorLabels" . | replace "\n" "," }}
 
-Only one of the 3 pods actually runs headscale at a time. Find out which:
+Only one of the {{ .Values.ha.replicas }} pods actually runs headscale at a time. Find out which:
   kubectl -n {{ .Release.Namespace }} exec {{ include "headscale.fullname" . }}-0 -c consul-agent -- \
     consul kv get -http-addr=127.0.0.1:8500 headscale/leader-pod
 
