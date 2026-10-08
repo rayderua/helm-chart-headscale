@@ -104,8 +104,8 @@ data:
         health_checks:
         - timeout: {{ .Values.ha.envoy.activeHealthCheck.timeoutSeconds }}s
           interval: {{ .Values.ha.envoy.activeHealthCheck.intervalSeconds }}s
-          unhealthy_threshold: 2
-          healthy_threshold: 1
+          unhealthy_threshold: {{ .Values.ha.envoy.activeHealthCheck.unhealthyThreshold }}
+          healthy_threshold: {{ .Values.ha.envoy.activeHealthCheck.healthyThreshold }}
           http_health_check:
             path: /health
             host: headscale

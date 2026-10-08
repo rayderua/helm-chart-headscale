@@ -37,6 +37,12 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "headscale.serviceAccountName" . }}
+      # Default (30s) isn't enough headroom for the consul-agent preStop
+      # hook, which can wait up to ha.lock.handoffTimeoutSeconds for a
+      # clean leader handoff before letting termination proceed - this
+      # needs to comfortably cover that plus the normal SIGTERM shutdown
+      # of the other containers.
+      terminationGracePeriodSeconds: {{ add .Values.ha.lock.handoffTimeoutSeconds 20 }}
       {{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) .Values.acl.reloadSidecar.enabled }}
       # Required so the reload sidecar can send SIGHUP to the headscale
       # process in the neighboring container instead of restarting the pod.
@@ -162,6 +168,11 @@ spec:
               mountPath: /etc/headscale/derp-map
               readOnly: true
 {{- end }}
+{{- if .Values.dns.hotReload }}
+            - name: dns-records
+              mountPath: /etc/headscale/dns
+              readOnly: true
+{{- end }}
             - name: data
               mountPath: /var/lib/headscale
             - name: ha-scripts
@@ -242,6 +253,10 @@ spec:
               containerPort: 8500
             - name: serf-lan
               containerPort: 8301
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "/scripts/consul-agent-prestop.sh"]
           resources:
             {{- toYaml .Values.ha.consulAgent.resources | nindent 12 }}
           volumeMounts:
@@ -272,6 +287,15 @@ spec:
               containerPort: {{ .Values.service.httpPort }}
             - name: grpc
               containerPort: {{ .Values.service.grpcPort }}
+            # Admin interface (/clusters, /stats, /config_dump) - binds to
+            # 127.0.0.1 only per the bootstrap config, so this doesn't
+            # actually change reachability (loopback-only regardless,
+            # `kubectl port-forward` reaches it fine either way since it
+            # attaches inside the pod's network namespace) - declared
+            # mainly so it shows up in `kubectl describe pod` instead of
+            # being an undocumented implicit port.
+            - name: envoy-admin
+              containerPort: 9901
           resources:
             {{- toYaml .Values.ha.envoy.resources | nindent 12 }}
           volumeMounts:
@@ -336,6 +360,14 @@ spec:
         - name: derp-map
           configMap:
             name: {{ include "headscale.fullname" . }}-derp-map
+{{- end }}
+{{- if .Values.dns.hotReload }}
+        # NOT part of checksum/config on purpose - headscale watches this
+        # file itself and hot-reloads it, a pod restart would be actively
+        # counterproductive here.
+        - name: dns-records
+          configMap:
+            name: {{ include "headscale.fullname" . }}-dns-records
 {{- end }}
         {{- with .Values.extraVolumes }}
         {{- toYaml . | nindent 8 }}
