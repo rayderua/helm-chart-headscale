@@ -241,6 +241,57 @@ noisePrivateKey:
   existingSecretKey: "noise_private.key"
 
 # -----------------------------------------------------------------------
+# extraHosts
+#
+# Shared between ACL (acl.policy.acls "tag:<name>:<port>" expansion, see
+# below) and DNS (auto-generates A/AAAA records, see dns.hotReload below).
+# One source of truth for "these are hosts outside the tailnet" instead of
+# maintaining the same list twice.
+# -----------------------------------------------------------------------
+extraHosts: {}
+  # db-1:
+  #   address: "10.0.5.10/32"
+  #   tags: ["database", "prod"]
+  #   # dns defaults smartly: true for a single host (/32, /128, or a bare
+  #   # IP with no mask at all), false for anything broader (a subnet
+  #   # address isn't a meaningful DNS target). Set it explicitly either
+  #   # way to override - explicit always wins over the auto-detection.
+  # db-2:
+  #   address: "10.0.5.11/32"
+  #   tags: ["database"]
+  # office-net:
+  #   address: "192.168.1.0/24"   # a subnet - defaults to dns: false on its own
+  # # and headscale.dns.extraRecords automatically gets "db-1" -> 10.0.5.10
+  # # the ACL rules themselves go in extraAcl below, NOT acl.policy.acls -
+  # # see that comment for why.
+
+# -----------------------------------------------------------------------
+# extraAcl
+#
+# ACL rules shaped exactly like acl.policy.acls, except "dst" entries can
+# use "tag:<name>" / "tag:<name>:<port>" as a pseudo-tag resolved against
+# extraHosts[*].tags. These are ALWAYS fully expanded into real
+# host:port entries before reaching headscale - never left as a raw
+# "tag:" reference. That matters because headscale validates every
+# "tag:" reference in a policy against tagOwners and rejects the WHOLE
+# policy if one doesn't resolve to anything - so a pseudo-tag with no
+# corresponding tagOwners entry (which is the normal case here, since
+# these aren't real tailscale node tags) would break policy application
+# entirely if it ever reached headscale unexpanded. Put rules that
+# reference real groups/tags in acl.policy.acls as usual; only put rules
+# that need extraHosts tag-group expansion here.
+#
+# An extraAcl rule referencing a tag with no matching extraHosts entry
+# fails the whole template render (not a silently-dropped rule) - a
+# missing ACL rule is a worse failure mode than a loud error at deploy
+# time.
+# -----------------------------------------------------------------------
+extraAcl: []
+  # - action: accept
+  #   src: ["group:dba"]
+  #   dst: ["tag:database:5432"]   # -> expands to db-1:5432, db-2:5432
+
+# -----------------------------------------------------------------------
 # DNS
 # -----------------------------------------------------------------------
 dns:
@@ -251,15 +302,23 @@ dns:
       - 1.1.1.1
       - 8.8.8.8
   searchDomains: []
-  # -- additional static DNS records (extraDnsRecords). Rendered directly
-  # into config.yaml; changing this updates the ConfigMap and triggers a
-  # StatefulSet rolling restart via the existing checksum/config annotation
-  # (see "reload" below) - headscale doesn't hot-reload DNS records, so
-  # there's no point pretending otherwise with extra moving parts.
+  # -- additional static DNS records, combined with the ones auto-generated
+  # from extraHosts above (same {name, type, value} shape).
   extraRecords: []
     # - name: "grafana.vpn.example.com"
     #   type: "A"
     #   value: "100.64.0.3"
+  # -- false (default): records render inline into config.yaml
+  # (dns.extra_records) - a change goes through the normal
+  # checksum/config-triggered rolling restart like any other config change.
+  # true: records render into a separate ConfigMap instead, referenced via
+  # dns.extra_records_path - headscale watches that file continuously and
+  # hot-reloads it ON ITS OWN, no restart, no SIGHUP, no extra reload
+  # mechanism needed on our end (this is a genuine, documented headscale
+  # capability specific to extra_records_path, unlike nearly everything
+  # else in config.yaml). Worth turning on if extraHosts/extraRecords
+  # change often enough that restarting on every change is annoying.
+  hotReload: false
 
 # -----------------------------------------------------------------------
 # ACL / policy
@@ -310,6 +369,11 @@ acl:
       #   - "group:admins"
   rawPolicy: ""
 
+  # -- external, non-tailnet hosts that also carry pseudo-tags for
+  # grouping - headscale has no native "host group"/ipset construct (see
+  # README), so this is how you get one: define hosts here with tags, and
+  # any acls[].dst entry shaped "tag:<name>:<port>" where <name> matches
+  # one of these tags gets expanded into a separate rule covering every
   # -- SIGHUP reload sidecar for mode (2): watches the mounted policy file
   # and sends headscale SIGHUP on change, instead of restarting the pod.
   # Uses shareProcessNamespace, hence the separate toggle.
@@ -354,6 +418,13 @@ acl:
 
     # -- how often to run headscale-pf prepare + apply via the REST API
     intervalSeconds: 300
+
+    # -- both prepare.sh and apply.sh exit (crashing their container) after
+    # this many CONSECUTIVE failures, instead of looping forever on a
+    # silently-broken sync - a crash shows up as a restart count /
+    # CrashLoopBackOff, which actually gets noticed instead of sitting
+    # unread in logs. Resets to 0 on any success.
+    failThreshold: 3
 
     # -- policy template for headscale-pf: NOT a separate field - reuses
     # acl.policy/acl.rawPolicy above (same values, same rendering, single
@@ -511,7 +582,16 @@ ha:
     activeHealthCheck:
       enabled: true
       intervalSeconds: 3
-      timeoutSeconds: 1
+      # -- 1s was too tight: a single slow /health response (GC pause,
+      # brief load spike - not necessarily a real problem) combined with
+      # unhealthyThreshold: 2 was enough to flip the cluster to "no
+      # healthy upstream" with zero actual downtime, just normal latency
+      # variance. Loosened both; tune further if you still see false
+      # positives (check Envoy's own /stats health_check counters to
+      # confirm it's actually this and not something else first).
+      timeoutSeconds: 3
+      unhealthyThreshold: 3
+      healthyThreshold: 1
 
   lock:
     # sessionTTL/lockDelay are NOT actually wired anywhere below - `consul
@@ -524,6 +604,14 @@ ha:
     # session-create + KV-acquire calls against the HTTP API.
     sessionTTL: "15s"
     lockDelay: "15s"
+    # -- how long the consul-agent preStop hook waits, on voluntary pod
+    # termination (rollouts, drains, manual deletes), for a DIFFERENT pod
+    # to confirm as the new leader before letting termination actually
+    # proceed. Only matters when this pod IS currently leader - standby
+    # pods' preStop is an immediate no-op. Also used to derive
+    # terminationGracePeriodSeconds (this + 20s buffer), so raising it
+    # raises that too automatically.
+    handoffTimeoutSeconds: 40
     # local liveness polling of headscale's own /health, from the sidecar,
     # over loopback (same pod)
     healthCheckIntervalSeconds: 5
