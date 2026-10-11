@@ -136,8 +136,10 @@ spec:
   volumeClaimTemplates:
     - metadata:
         name: data
+        # Only stable labels here: volumeClaimTemplates is immutable, so
+        # helm.sh/chart / app.kubernetes.io/version must never appear in it.
         labels:
-          {{- include "headscale.labels" . | nindent 10 }}
+          {{- include "headscale.selectorLabels" . | nindent 10 }}
         {{- with .Values.ha.consul.persistence.annotations }}
         annotations:
           {{- toYaml . | nindent 10 }}
