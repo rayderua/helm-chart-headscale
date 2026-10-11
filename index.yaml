@@ -3,7 +3,7 @@ entries:
   headscale:
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:26:17.27422964Z"
+    created: "2026-10-11T20:28:38.323651761Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -25,7 +25,7 @@ entries:
     version: 0.2.1-dev.10+9b11d6e
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:26:17.272472167Z"
+    created: "2026-10-11T20:28:38.321843221Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -47,7 +47,29 @@ entries:
     version: 0.2.0
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:26:17.270621038Z"
+    created: "2026-10-11T20:28:38.315387161Z"
+    description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
+      leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
+      optional bundled PostgreSQL
+    digest: e45a06527c45cea944a3b27e272d528b8ef62c929821b4a50f645b751eada845
+    home: https://github.com/juanfont/headscale
+    keywords:
+    - headscale
+    - tailscale
+    - wireguard
+    - vpn
+    maintainers:
+    - name: platform-team
+    name: headscale
+    sources:
+    - https://github.com/juanfont/headscale
+    type: application
+    urls:
+    - https://rayderua.github.io/helm-chart-headscale/headscale-0.2.0-dev.11+55cb988.tgz
+    version: 0.2.0-dev.11+55cb988
+  - apiVersion: v2
+    appVersion: 0.29.4
+    created: "2026-10-11T20:28:38.319026Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -69,7 +91,7 @@ entries:
     version: 0.2.0-dev.8+8651289
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:26:17.268826796Z"
+    created: "2026-10-11T20:28:38.317163079Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -91,7 +113,7 @@ entries:
     version: 0.2.0-dev.7+345d27d
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:26:17.266666451Z"
+    created: "2026-10-11T20:28:38.313682786Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -113,7 +135,7 @@ entries:
     version: 0.1.1-dev.6+410707d
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:26:17.264128509Z"
+    created: "2026-10-11T20:28:38.31186046Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -135,7 +157,7 @@ entries:
     version: 0.1.0
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:26:17.261613321Z"
+    created: "2026-10-11T20:28:38.309122652Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -157,7 +179,7 @@ entries:
     version: 0.1.0-dev.5+0542117
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:26:17.259815582Z"
+    created: "2026-10-11T20:28:38.306723659Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -177,4 +199,4 @@ entries:
     urls:
     - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.0-dev.3+f7c56ef.tgz
     version: 0.1.0-dev.3+f7c56ef
-generated: "2026-10-11T20:26:17.257984091Z"
+generated: "2026-10-11T20:28:38.304434772Z"
