@@ -3,7 +3,29 @@ entries:
   headscale:
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.624507871Z"
+    created: "2026-10-11T20:57:47.613040918Z"
+    description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
+      leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
+      optional bundled PostgreSQL
+    digest: 8332af77a3c7a005e56734a8311eb33d1efc0a762e9532f33d90645d762bf4e3
+    home: https://github.com/juanfont/headscale
+    keywords:
+    - headscale
+    - tailscale
+    - wireguard
+    - vpn
+    maintainers:
+    - name: platform-team
+    name: headscale
+    sources:
+    - https://github.com/juanfont/headscale
+    type: application
+    urls:
+    - https://rayderua.github.io/helm-chart-headscale/headscale-0.2.2.tgz
+    version: 0.2.2
+  - apiVersion: v2
+    appVersion: 0.29.4
+    created: "2026-10-11T20:57:47.611306719Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -25,7 +47,7 @@ entries:
     version: 0.2.2-dev.17+42f3de6
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.622752447Z"
+    created: "2026-10-11T20:57:47.609544107Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -47,7 +69,7 @@ entries:
     version: 0.2.1
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.621040926Z"
+    created: "2026-10-11T20:57:47.607786034Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -69,7 +91,7 @@ entries:
     version: 0.2.1-dev.15+c0f61ca
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.619275163Z"
+    created: "2026-10-11T20:57:47.605533541Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -91,7 +113,7 @@ entries:
     version: 0.2.1-dev.10+9b11d6e
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.617061991Z"
+    created: "2026-10-11T20:57:47.603502398Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -113,7 +135,7 @@ entries:
     version: 0.2.0
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.611408316Z"
+    created: "2026-10-11T20:57:47.598216645Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -135,7 +157,7 @@ entries:
     version: 0.2.0-dev.13+d635282
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.609634428Z"
+    created: "2026-10-11T20:57:47.595913183Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -157,7 +179,7 @@ entries:
     version: 0.2.0-dev.12+8bd2660
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.607178854Z"
+    created: "2026-10-11T20:57:47.593944556Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -179,7 +201,7 @@ entries:
     version: 0.2.0-dev.11+55cb988
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.615001857Z"
+    created: "2026-10-11T20:57:47.601755324Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -201,7 +223,7 @@ entries:
     version: 0.2.0-dev.8+8651289
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.613208202Z"
+    created: "2026-10-11T20:57:47.600010496Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -223,7 +245,7 @@ entries:
     version: 0.2.0-dev.7+345d27d
   - apiVersion: v2
     appVersion: 0.29.4
-    created: "2026-10-11T20:53:34.605447456Z"
+    created: "2026-10-11T20:57:47.592224995Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -245,7 +267,7 @@ entries:
     version: 0.1.1-dev.6+410707d
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:53:34.603604549Z"
+    created: "2026-10-11T20:57:47.590416787Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -267,7 +289,7 @@ entries:
     version: 0.1.0
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:53:34.601874192Z"
+    created: "2026-10-11T20:57:47.588671167Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -289,7 +311,7 @@ entries:
     version: 0.1.0-dev.5+0542117
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-11T20:53:34.599981241Z"
+    created: "2026-10-11T20:57:47.586036929Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -309,4 +331,4 @@ entries:
     urls:
     - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.0-dev.3+f7c56ef.tgz
     version: 0.1.0-dev.3+f7c56ef
-generated: "2026-10-11T20:53:34.597149757Z"
+generated: "2026-10-11T20:57:47.584250322Z"
