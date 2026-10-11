@@ -2,8 +2,30 @@ apiVersion: v1
 entries:
   headscale:
   - apiVersion: v2
+    appVersion: 0.29.4
+    created: "2026-10-11T19:40:30.656224781Z"
+    description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
+      leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
+      optional bundled PostgreSQL
+    digest: 866f922a675ed4bed0d34a1dcf368d03eec9cc3d176124274c65ddbb2f7529b2
+    home: https://github.com/juanfont/headscale
+    keywords:
+    - headscale
+    - tailscale
+    - wireguard
+    - vpn
+    maintainers:
+    - name: platform-team
+    name: headscale
+    sources:
+    - https://github.com/juanfont/headscale
+    type: application
+    urls:
+    - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.1-dev.6+410707d.tgz
+    version: 0.1.1-dev.6+410707d
+  - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-08T11:01:33.219714312Z"
+    created: "2026-10-11T19:40:30.654377021Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -25,7 +47,7 @@ entries:
     version: 0.1.0
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-08T11:01:33.218122412Z"
+    created: "2026-10-11T19:40:30.6527855Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -47,7 +69,7 @@ entries:
     version: 0.1.0-dev.5+0542117
   - apiVersion: v2
     appVersion: 0.29.3
-    created: "2026-10-08T11:01:33.216919485Z"
+    created: "2026-10-11T19:40:30.650964159Z"
     description: Helm chart for a self-hosted, always-HA Headscale (Consul-driven
       leader election + Envoy sidecar mesh) with a lightweight bundled Consul and
       optional bundled PostgreSQL
@@ -67,4 +89,4 @@ entries:
     urls:
     - https://rayderua.github.io/helm-chart-headscale/headscale-0.1.0-dev.3+f7c56ef.tgz
     version: 0.1.0-dev.3+f7c56ef
-generated: "2026-10-08T11:01:33.215702386Z"
+generated: "2026-10-11T19:40:30.648334345Z"
