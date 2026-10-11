@@ -1,13 +1,10 @@
 # -- Default values for the headscale chart --
 
 image:
-  # -- your own image with a shell baked in (needed for the HA start/stop
-  # supervisor script) - the upstream headscale/headscale image ships none.
+  # -- headscale image; it must include a shell (needed for the HA
+  # start/stop supervisor script)
   repository: ghcr.io/rayderua/headscale-alpine
-  # -- chart checks repository+tag together for "alpine" as a sanity check
-  # that you're not accidentally pointing at a shell-less image; adjust
-  # that check in _helpers.tpl if your own image is named differently.
-  tag: ""
+  # tag: override the image tag; defaults to the chart appVersion
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 
@@ -505,9 +502,8 @@ acl:
 #     completely unchanged; only pods "inside" get smarter.
 #
 # Requirements:
-#   - image.tag should point at an "-alpine" variant of headscale/headscale
-#     (the default/non-alpine image ships no shell, which the in-pod
-#     start/stop supervisor script needs)
+#   - the headscale image must include a shell (the in-pod start/stop
+#     supervisor script needs one)
 #   - ha.consul.replicas must be odd (Raft quorum)
 #
 # This is a deliberately lightweight, single-region setup: no gossip
@@ -522,6 +518,14 @@ ha:
   # standbys you want on hand. ha.consul.replicas below is the one that
   # actually needs to stay odd.
   replicas: 2
+
+  rollout:
+    # -- seconds a restarted pod must stay Ready (= usable standby) before
+    # the StatefulSet rollout continues to the next pod
+    minReadySeconds: 10
+    # -- seconds a terminating pod keeps envoy running after the leader
+    # handoff, so the Service/Ingress stops sending new connections to it
+    drainSeconds: 5
 
   # -- internal ports headscale itself binds to (only reachable pod-to-pod,
   # never exposed via the Service - envoy takes over

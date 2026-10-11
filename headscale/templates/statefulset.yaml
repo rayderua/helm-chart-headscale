@@ -8,6 +8,9 @@ spec:
   serviceName: {{ include "headscale.fullname" . }}-headless
   replicas: {{ .Values.ha.replicas }}
   podManagementPolicy: OrderedReady
+  # A freshly restarted pod must stay Ready this long before the rollout
+  # moves on to the next ordinal (which may be the current leader).
+  minReadySeconds: {{ .Values.ha.rollout.minReadySeconds }}
   selector:
     matchLabels:
       {{- include "headscale.selectorLabels" . | nindent 6 }}
@@ -42,7 +45,7 @@ spec:
       # clean leader handoff before letting termination proceed - this
       # needs to comfortably cover that plus the normal SIGTERM shutdown
       # of the other containers.
-      terminationGracePeriodSeconds: {{ add .Values.ha.lock.handoffTimeoutSeconds 20 }}
+      terminationGracePeriodSeconds: {{ add .Values.ha.lock.handoffTimeoutSeconds .Values.ha.rollout.drainSeconds 20 }}
       {{- if and .Values.acl.enabled (not .Values.acl.sync.enabled) .Values.acl.reloadSidecar.enabled }}
       # Required so the reload sidecar can send SIGHUP to the headscale
       # process in the neighboring container instead of restarting the pod.
@@ -114,7 +117,7 @@ spec:
           securityContext:
             {{- toYaml .Values.securityContext | nindent 12 }}
           # This container's PID1 is a small supervisor script (requires a
-          # shell - use an "-alpine" image.tag) that starts/stops the real
+          # shell in the image) that starts/stops the real
           # `headscale serve` process based on whether the consul-agent
           # sidecar has marked this pod as leader. See
           # templates/configmap-ha-scripts.yaml.
@@ -253,6 +256,16 @@ spec:
               containerPort: 8500
             - name: serf-lan
               containerPort: 8301
+          # Ready == this pod is a usable standby (joined Consul and its
+          # serfHealth check is passing, so it can take over the lock). The
+          # flag file is written by consul-agent-entrypoint.sh. Without this
+          # gate a rollout considers the restarted pod Ready immediately and
+          # kills the current leader while no standby can take over yet.
+          readinessProbe:
+            exec:
+              command: ["test", "-f", "/shared/agent-ready"]
+            periodSeconds: 2
+            failureThreshold: 3
           lifecycle:
             preStop:
               exec:
@@ -296,6 +309,21 @@ spec:
             # being an undocumented implicit port.
             - name: envoy-admin
               containerPort: 9901
+          # Keep envoy serving (and forwarding to the new leader) until the
+          # consul-agent preStop has finished the leader handoff and the
+          # drain delay; otherwise it receives SIGTERM at the same moment as
+          # every other container and clients are cut off mid-election.
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - sh
+                  - -c
+                  - |
+                    i=0
+                    while [ ! -f /shared/handoff-done ] && [ "$i" -lt {{ add .Values.ha.lock.handoffTimeoutSeconds .Values.ha.rollout.drainSeconds 10 }} ]; do
+                      sleep 1; i=$((i + 1))
+                    done
           resources:
             {{- toYaml .Values.ha.envoy.resources | nindent 12 }}
           volumeMounts:

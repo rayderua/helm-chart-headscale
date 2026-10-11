@@ -55,6 +55,8 @@ data:
       echo "waiting for the serfHealth check to turn passing..."
       sleep 2
     done
+    # Signals the pod's readinessProbe: this pod can act as a standby now.
+    touch /shared/agent-ready
 
     # Every pod watches who the current leader is, regardless of whether
     # this pod holds the lock itself, and keeps envoy's EDS file current.
@@ -261,8 +263,8 @@ data:
     mv "$TMP" /shared/eds/grpc.yaml
     echo "updated envoy EDS -> ${ADDR}"
 
-  # Runs as the headscale container's entrypoint (requires an -alpine image
-  # tag, since the default headscale/headscale image has no shell). Watches
+  # Runs as the headscale container's entrypoint (requires an image with a
+  # shell). Watches
   # the shared leader-flag file and starts/stops the real `headscale serve`
   # process locally as leadership is gained or lost. This is the "cold
   # restart on promotion" piece: headscale only reads DB state at process
@@ -338,18 +340,30 @@ data:
 {{- end }}
 
   # preStop hook on the consul-agent container - runs BEFORE Kubernetes
-  # sends SIGTERM (rollouts, drains, manual deletes, all go through this
-  # the same way). If this pod is currently leader, proactively releases
-  # the lock and WAITS for a different pod to confirm as the new leader
-  # before letting termination proceed, instead of just reacting to
-  # SIGTERM and hoping a clean handoff happens fast enough. If this pod
-  # isn't leader, it's a fast no-op - standby pods terminate immediately.
+  # sends SIGTERM to THIS container. IMPORTANT: every container of a pod
+  # gets its SIGTERM at the same moment (their preStop hooks run in
+  # parallel), so envoy has its own preStop that waits for the flag file
+  # /shared/handoff-done written at the end of this script. Without that,
+  # envoy dies immediately and clients lose the connection long before the
+  # leader election has finished.
+  #
+  # If this pod is currently leader, it releases the lock and WAITS until a
+  # different pod is leader AND answers /health. Then (leader or not) it
+  # waits ha.rollout.drainSeconds so the Service endpoints stop pointing at
+  # this pod, and only then signals envoy that it may shut down.
   consul-agent-prestop.sh: |
     #!/bin/sh
     set -u
+
+    finish() {
+      sleep {{ .Values.ha.rollout.drainSeconds }}
+      touch /shared/handoff-done
+      exit 0
+    }
+
     if [ ! -f /shared/leader ]; then
       echo "not currently leader, nothing to hand off"
-      exit 0
+      finish
     fi
 
     echo "currently leader - releasing the lock proactively before termination"
@@ -363,10 +377,17 @@ data:
     while [ "$i" -lt "$TIMEOUT" ]; do
       NEW_LEADER=$(consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.leaderPodKvPath" . }} 2>/dev/null || true)
       if [ -n "$NEW_LEADER" ] && [ "$NEW_LEADER" != "$ME" ]; then
-        echo "new leader confirmed: $NEW_LEADER - safe to terminate"
-        exit 0
+        # The lock being taken is not enough: headscale on the new leader
+        # needs a few seconds to start. Keep this pod (and its envoy) alive
+        # until the new leader answers /health.
+        NEW_ADDR=$(consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} headscale/leader-addr 2>/dev/null || true)
+        if [ -n "$NEW_ADDR" ] && wget -q -T 2 -O /dev/null "http://${NEW_ADDR}:{{ .Values.ha.internalHttpPort }}/health" 2>/dev/null; then
+          echo "new leader confirmed and healthy: $NEW_LEADER - safe to terminate"
+          finish
+        fi
       fi
       sleep 1
       i=$((i + 1))
     done
     echo "WARNING: no new leader confirmed within ${TIMEOUT}s, proceeding with termination anyway" >&2
+    finish
