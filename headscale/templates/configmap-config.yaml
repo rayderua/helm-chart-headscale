@@ -104,12 +104,22 @@ data:
 {{- range .Values.dns.searchDomains }}
         - {{ . | quote }}
 {{- end }}
-{{- if .Values.dns.extraRecords }}
+{{- if .Values.dns.hotReload }}
+      # Separate file (configmap-dns-records.yaml), watched and
+      # hot-reloaded by headscale on its own - see dns.hotReload in
+      # values.yaml for why this needs no restart/SIGHUP/reloader.
+      extra_records_path: /etc/headscale/dns/extra-records.json
+{{- else }}
+{{- $records := include "headscale.dnsExtraRecordsJson" . | fromJsonArray }}
+{{- if $records }}
       extra_records:
-{{- range .Values.dns.extraRecords }}
+{{- range $records }}
         - name: {{ .name | quote }}
           type: {{ .type | quote }}
           value: {{ .value | quote }}
+{{- end }}
+{{- else }}
+      extra_records: []
 {{- end }}
 {{- end }}
 

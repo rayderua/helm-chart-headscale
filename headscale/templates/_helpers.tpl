@@ -249,8 +249,113 @@ here. Everything else passes through as written. */}}
 {{- if .Values.acl.rawPolicy -}}
 {{ .Values.acl.rawPolicy }}
 {{- else -}}
-{{ .Values.acl.policy | toJson }}
+{{- $policy := .Values.acl.policy | deepCopy -}}
+
+{{/* Merge acl.extraHosts[*].address as simple host aliases, same as
+manually writing them into acl.policy.hosts. */}}
+{{- $hosts := index $policy "hosts" | default dict -}}
+{{- range $hostName, $hostData := .Values.extraHosts -}}
+{{- $_ := set $hosts $hostName $hostData.address -}}
 {{- end -}}
+{{- $_ := set $policy "hosts" $hosts -}}
+
+{{/* headscale has no native "host group"/ipset construct - build a
+tag -> [hostnames] reverse map from extraHosts[*].tags so extraAcl rules
+(below) can use "tag:<name>" to mean "every host carrying this tag". */}}
+{{- $tagMap := dict -}}
+{{- range $hostName, $hostData := .Values.extraHosts -}}
+{{- range $tag := ($hostData.tags | default list) -}}
+{{- $list := index $tagMap $tag | default list -}}
+{{- $_ := set $tagMap $tag (append $list $hostName) -}}
+{{- end -}}
+{{- end -}}
+
+{{/* .Values.extraAcl holds rules shaped exactly like acl.policy.acls,
+except "dst" entries can use "tag:<name>" or "tag:<name>:<port>" as a
+pseudo-tag referencing extraHosts groups. These NEVER reach the final
+policy in that raw form - headscale validates every "tag:" reference
+against tagOwners and rejects the WHOLE policy if one doesn't resolve, so
+a pseudo-tag with no real tagOwners entry would break everything if left
+in place (this used to happen: the same rule was kept both raw and
+expanded - fixed by only ever emitting the expanded form). Non-tag dst
+entries in an extraAcl rule pass through unchanged; an unknown pseudo-tag
+fails the whole template render rather than silently dropping the rule -
+a silently-missing ACL rule is a worse failure mode than a loud one. */}}
+{{- $expandedExtraAcls := list -}}
+{{- range $acl := (.Values.extraAcl | default list) -}}
+{{- $expandedDst := list -}}
+{{- range $dst := (index $acl "dst" | default list) -}}
+{{- if hasPrefix "tag:" $dst -}}
+{{- $parts := splitList ":" $dst -}}
+{{- $tagName := index $parts 1 -}}
+{{- $port := "*" -}}
+{{- if ge (len $parts) 3 -}}
+{{- $port = index $parts 2 -}}
+{{- end -}}
+{{- if not (hasKey $tagMap $tagName) -}}
+{{ fail (printf "extraAcl references tag:%s, which no extraHosts entry carries in its tags list - fix the typo, or add it to an extraHosts entry's tags" $tagName) }}
+{{- end -}}
+{{- range $hostName := index $tagMap $tagName -}}
+{{- $expandedDst = append $expandedDst (printf "%s:%s" $hostName $port) -}}
+{{- end -}}
+{{- else -}}
+{{- $expandedDst = append $expandedDst $dst -}}
+{{- end -}}
+{{- end -}}
+{{- $newAcl := $acl | deepCopy -}}
+{{- $_ := set $newAcl "dst" $expandedDst -}}
+{{- $expandedExtraAcls = append $expandedExtraAcls $newAcl -}}
+{{- end -}}
+{{- $_ := set $policy "acls" (concat ($policy.acls | default list) $expandedExtraAcls) -}}
+
+{{ $policy | toPrettyJson }}
+{{- end -}}
+{{- end -}}
+
+{{/* Combines dns.extraRecords (manual) with records auto-generated from
+extraHosts (skips any entry with dns: false - defaults to true when the
+key is absent). Strips a CIDR suffix (/32, /24, ...) from the address if
+present - only really meaningful for single-host entries (/32, /128, or a
+bare IP); a broader subnet will produce a record pointing at the network
+address, which is why per-host dns:false exists for exactly that case.
+Picks A vs AAAA by whether the address contains a colon. Returns a
+compact JSON array (not YAML) so it can be embedded as-is into the
+dns-records ConfigMap file (see configmap-dns-records.yaml) as well as
+parsed back with fromJsonArray for the inline config.yaml case. */}}
+{{- define "headscale.dnsExtraRecordsJson" -}}
+{{- $records := list -}}
+{{- range .Values.dns.extraRecords -}}
+{{- $records = append $records . -}}
+{{- end -}}
+{{- range $name, $data := .Values.extraHosts -}}
+{{- /* Default depends on whether the address is a single host (/32,
+/128, or a bare IP with no CIDR at all) vs a broader subnet - a subnet
+address isn't a meaningful DNS target, so it defaults to no record
+unless you explicitly say dns: true (explicit always wins either way). */ -}}
+{{- $isSingleHost := true -}}
+{{- if contains "/" $data.address -}}
+{{- $prefixLen := last (splitList "/" $data.address) -}}
+{{- if not (or (eq $prefixLen "32") (eq $prefixLen "128")) -}}
+{{- $isSingleHost = false -}}
+{{- end -}}
+{{- end -}}
+{{- $wantsDns := $isSingleHost -}}
+{{- if hasKey $data "dns" -}}
+{{- $wantsDns = $data.dns -}}
+{{- end -}}
+{{- if $wantsDns -}}
+{{- $ip := $data.address -}}
+{{- if contains "/" $ip -}}
+{{- $ip = first (splitList "/" $ip) -}}
+{{- end -}}
+{{- $type := "A" -}}
+{{- if contains ":" $ip -}}
+{{- $type = "AAAA" -}}
+{{- end -}}
+{{- $records = append $records (dict "name" $name "type" $type "value" $ip) -}}
+{{- end -}}
+{{- end -}}
+{{- $records | toJson -}}
 {{- end -}}
 
 {{- define "headscale.aclSyncApiKeyKvPath" -}}

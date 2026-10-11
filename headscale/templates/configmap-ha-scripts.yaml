@@ -75,10 +75,36 @@ data:
     ) &
     WATCH_PID=$!
 
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled }}
+    # Keeps the headscale-pf API key available locally on EVERY pod (not
+    # just the acl-sync Deployment), so `hs-api.sh` works for ad-hoc
+    # debugging (`headscale node list` equivalent) no matter which pod you
+    # exec into - Envoy on any pod already routes to the leader, this is
+    # just the missing piece (a valid token to authenticate with).
+    (
+      while true; do
+        consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.aclSyncApiKeyKvPath" . }} > /shared/api-key 2>/dev/null || true
+        sleep 30
+      done
+    ) &
+    APIKEY_WATCH_PID=$!
+{{- end }}
+
     # This pod's own attempt at becoming leader. consul lock blocks until
     # it acquires headscale/leader, then supervises lock-child.sh for as
     # long as the lock is held; it exits (and self-fences, see lock-child.sh)
     # the moment the lock is lost, so we just keep retrying forever.
+    #
+    # The `consul lock` PID is tracked in a file (not just a shell
+    # variable - this loop runs in a backgrounded subshell, so a plain
+    # variable wouldn't be visible to the trap in the parent shell below)
+    # specifically so both the trap and preStop.sh can send it a real,
+    # direct SIGTERM. Just `kill`ing the wrapping loop's own PID does NOT
+    # reach `consul lock` (a grandchild process) - it silently orphans it
+    # instead, and the lock then only gets released once the whole pod is
+    # torn down (session TTL expiry), not immediately. That gap was
+    # turning every voluntary pod termination (rollouts, drains) into a
+    # slower failover than necessary.
     while true; do
       # `consul lock` doesn't expose -session-ttl/-lock-delay as CLI flags
       # (those are session-create API fields, not lock-command flags) - it
@@ -89,14 +115,18 @@ data:
         -verbose \
         -monitor-retry=3 \
         headscale/leader \
-        /scripts/lock-child.sh || true
+        /scripts/lock-child.sh &
+      CL_PID=$!
+      echo "$CL_PID" > /shared/.lock-pid
+      wait "$CL_PID" || true
+      rm -f /shared/.lock-pid
       echo "lost or failed to acquire the leader lock, retrying..."
       rm -f /shared/leader
       sleep 2
     done &
     LOCK_PID=$!
 
-    trap 'kill $AGENT_PID $WATCH_PID $LOCK_PID 2>/dev/null' TERM INT
+    trap '[ -f /shared/.lock-pid ] && kill -TERM "$(cat /shared/.lock-pid)" 2>/dev/null; kill $AGENT_PID $WATCH_PID $LOCK_PID{{ if and .Values.acl.enabled .Values.acl.sync.enabled }} $APIKEY_WATCH_PID{{ end }} 2>/dev/null' TERM INT
     wait $AGENT_PID
 
   # Supervised by `consul lock` for as long as this pod holds the leader
@@ -281,3 +311,62 @@ data:
       fi
       sleep 2
     done
+
+{{- if and .Values.acl.enabled .Values.acl.sync.enabled }}
+  # Ad-hoc debugging from ANY pod, leader or standby - run via:
+  #   kubectl exec <any-pod> -c consul-agent -- sh /scripts/hs-api.sh /api/v1/node
+  # Works from any of the ha.replicas pods because Envoy on every pod
+  # already routes to the current leader over loopback - the only thing
+  # missing was a valid API key locally, which the background loop in
+  # consul-agent-entrypoint.sh keeps refreshed. GET only (read-only
+  # debugging is the point) - keeps this to plain `wget URL`, the same
+  # proven pattern already used for health checks elsewhere in this file,
+  # rather than gambling on this busybox build supporting --method=.
+  hs-api.sh: |
+    #!/bin/sh
+    set -eu
+    URLPATH="${1:?usage: hs-api.sh /api/v1/<resource>}"
+    TOKEN=$(cat /shared/api-key 2>/dev/null || true)
+    if [ -z "$TOKEN" ]; then
+      echo "no API key available yet in /shared/api-key - try again shortly" >&2
+      exit 1
+    fi
+    wget -q -O - \
+      --header="Authorization: Bearer ${TOKEN}" \
+      "http://127.0.0.1:{{ .Values.service.httpPort }}${URLPATH}"
+    echo
+{{- end }}
+
+  # preStop hook on the consul-agent container - runs BEFORE Kubernetes
+  # sends SIGTERM (rollouts, drains, manual deletes, all go through this
+  # the same way). If this pod is currently leader, proactively releases
+  # the lock and WAITS for a different pod to confirm as the new leader
+  # before letting termination proceed, instead of just reacting to
+  # SIGTERM and hoping a clean handoff happens fast enough. If this pod
+  # isn't leader, it's a fast no-op - standby pods terminate immediately.
+  consul-agent-prestop.sh: |
+    #!/bin/sh
+    set -u
+    if [ ! -f /shared/leader ]; then
+      echo "not currently leader, nothing to hand off"
+      exit 0
+    fi
+
+    echo "currently leader - releasing the lock proactively before termination"
+    if [ -f /shared/.lock-pid ]; then
+      kill -TERM "$(cat /shared/.lock-pid)" 2>/dev/null || true
+    fi
+
+    ME="$(hostname)"
+    TIMEOUT={{ .Values.ha.lock.handoffTimeoutSeconds }}
+    i=0
+    while [ "$i" -lt "$TIMEOUT" ]; do
+      NEW_LEADER=$(consul kv get -http-addr={{ include "headscale.consulLocalHttpAddr" . }} {{ include "headscale.leaderPodKvPath" . }} 2>/dev/null || true)
+      if [ -n "$NEW_LEADER" ] && [ "$NEW_LEADER" != "$ME" ]; then
+        echo "new leader confirmed: $NEW_LEADER - safe to terminate"
+        exit 0
+      fi
+      sleep 1
+      i=$((i + 1))
+    done
+    echo "WARNING: no new leader confirmed within ${TIMEOUT}s, proceeding with termination anyway" >&2

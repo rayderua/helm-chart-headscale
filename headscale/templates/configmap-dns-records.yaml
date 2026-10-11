@@ -1,0 +1,17 @@
+{{- if .Values.dns.hotReload -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "headscale.fullname" . }}-dns-records
+  labels:
+    {{- include "headscale.labels" . | nindent 4 }}
+data:
+  # headscale watches this file continuously and hot-reloads changes on
+  # its own - no restart, no SIGHUP, no reload-sidecar needed on our end.
+  # This is a genuine, documented headscale capability specific to
+  # dns.extra_records_path (see values.yaml dns.hotReload for details) -
+  # unlike almost everything else in config.yaml, which does need a
+  # restart to pick up changes.
+  extra-records.json: |
+    {{ include "headscale.dnsExtraRecordsJson" . }}
+{{- end -}}

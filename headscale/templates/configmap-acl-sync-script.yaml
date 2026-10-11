@@ -15,11 +15,18 @@ data:
   # (it didn't, for the default image) - splitting responsibility means we
   # get to pick an image we're actually sure has curl for that part,
   # instead of gambling on this one.
+  #
+  # Exits (crashing the container) after acl.sync.failThreshold consecutive
+  # failures, on purpose - a loop that just logs an error and keeps going
+  # forever is invisible unless someone happens to be reading logs at the
+  # right time. A crash shows up as a restart count / CrashLoopBackOff,
+  # which actually gets noticed.
   prepare.sh: |
     #!/bin/sh
     set -u
     INTERVAL="${SYNC_INTERVAL_SECONDS:-300}"
     CURRENT=/shared/current.json
+    FAILS=0
 
     while true; do
       TS=$(date -Is)
@@ -34,8 +41,14 @@ data:
           --output-format=json \
           $PF_EXTRA_ARGS; then
         echo "[$TS] wrote resolved policy to $CURRENT"
+        FAILS=0
       else
-        echo "[$TS] ERROR: headscale-pf prepare failed" >&2
+        FAILS=$((FAILS + 1))
+        echo "[$TS] ERROR: headscale-pf prepare failed ($FAILS/{{ .Values.acl.sync.failThreshold }})" >&2
+        if [ "$FAILS" -ge {{ .Values.acl.sync.failThreshold }} ]; then
+          echo "[$TS] giving up after {{ .Values.acl.sync.failThreshold }} consecutive failures, exiting" >&2
+          exit 1
+        fi
       fi
 
       sleep "$INTERVAL"
@@ -43,12 +56,14 @@ data:
 
   # Runs in the "policy-applier" container (curlimages/curl - guaranteed to
   # have curl, unlike the headscale-pf image). Watches the file prepare.sh
-  # writes and PUTs it to headscale's REST API whenever it changes.
+  # writes and PUTs it to headscale's REST API whenever it changes. Same
+  # fail-and-crash-after-N-attempts reasoning as prepare.sh above.
   apply.sh: |
     #!/bin/sh
     set -u
     CURRENT=/shared/current.json
     APPLIED=/tmp/applied.json
+    FAILS=0
 
     # HEADSCALE_API_TOKEN arrives either as a real env var (apiKey.existingSecret
     # was set) or, by default, via a file an initContainer fetched from Consul KV.
@@ -83,9 +98,15 @@ data:
           if [ "$HTTP_CODE" = "200" ]; then
             cp "$CURRENT" "$APPLIED"
             echo "[$TS] policy applied successfully"
+            FAILS=0
           else
-            echo "[$TS] ERROR: applying policy failed (HTTP $HTTP_CODE)" >&2
+            FAILS=$((FAILS + 1))
+            echo "[$TS] ERROR: applying policy failed (HTTP $HTTP_CODE) ($FAILS/{{ .Values.acl.sync.failThreshold }})" >&2
             cat /tmp/policy-response.json >&2 2>/dev/null || true
+            if [ "$FAILS" -ge {{ .Values.acl.sync.failThreshold }} ]; then
+              echo "[$TS] giving up after {{ .Values.acl.sync.failThreshold }} consecutive failures, exiting" >&2
+              exit 1
+            fi
           fi
         fi
       fi
