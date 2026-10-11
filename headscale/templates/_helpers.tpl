@@ -58,7 +58,7 @@ nasty thing to debug blind. Catching it here instead - checks both
 repository and tag since a custom image (e.g. "myorg/headscale-alpine")
 might carry "alpine" in its name rather than its tag. */}}
 {{- define "headscale.image" -}}
-{{- $tag := .Values.image.tag | default (printf "%s-alpine" .Chart.AppVersion) -}}
+{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
 {{- if not (or (contains "alpine" .Values.image.repository) (contains "alpine" $tag)) -}}
 {{ fail (printf "neither image.repository (%q) nor image.tag (%q) mentions \"alpine\". The default headscale/headscale image has no shell, which the HA start/stop supervisor script needs - use an alpine-based image/tag, or a custom image with a shell baked in." .Values.image.repository $tag) }}
 {{- end -}}
