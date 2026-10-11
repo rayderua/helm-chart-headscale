@@ -47,21 +47,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{/* Image reference with fallback to appVersion */}}
-{{/* Image reference with fallback to appVersion. Fails fast if neither the
-repository nor the tag mentions "alpine": the headscale container's command
-is a shell script (needed for the leader/standby start-stop supervisor),
-and the default (non-alpine) headscale/headscale image ships no shell at
-all - it fails to exec silently, with nothing at all in `kubectl logs` (the
-container never gets far enough to log anything), which is a genuinely
-nasty thing to debug blind. Catching it here instead - checks both
-repository and tag since a custom image (e.g. "myorg/headscale-alpine")
-might carry "alpine" in its name rather than its tag. */}}
+{{/* Image reference with fallback to appVersion. The image must contain a
+shell (the headscale container runs a supervisor script). */}}
 {{- define "headscale.image" -}}
 {{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
-{{- if not (or (contains "alpine" .Values.image.repository) (contains "alpine" $tag)) -}}
-{{ fail (printf "neither image.repository (%q) nor image.tag (%q) mentions \"alpine\". The default headscale/headscale image has no shell, which the HA start/stop supervisor script needs - use an alpine-based image/tag, or a custom image with a shell baked in." .Values.image.repository $tag) }}
-{{- end -}}
 {{- printf "%s:%s" .Values.image.repository $tag -}}
 {{- end -}}
 
@@ -308,7 +297,7 @@ a silently-missing ACL rule is a worse failure mode than a loud one. */}}
 {{- end -}}
 {{- $_ := set $policy "acls" (concat ($policy.acls | default list) $expandedExtraAcls) -}}
 
-{{ $policy | toPrettyJson }}
+{{ $policy | toJson }}
 {{- end -}}
 {{- end -}}
 
